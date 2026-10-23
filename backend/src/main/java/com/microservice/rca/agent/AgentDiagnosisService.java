@@ -15,6 +15,7 @@ import com.microservice.rca.diagnosis.service.FaultEventService;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
@@ -28,6 +29,7 @@ public class AgentDiagnosisService {
 
     private static final Set<DiagnosisStatus> ACTIVE_STATUSES =
             Set.of(DiagnosisStatus.PENDING, DiagnosisStatus.RUNNING);
+    private static final Set<String> AGENT_TRIGGER_SOURCES = Set.of("AGENT", "AGENT_RETRY");
 
     private final DiagnosisTaskRepository taskRepository;
     private final ToolInvocationRepository invocationRepository;
@@ -49,10 +51,7 @@ public class AgentDiagnosisService {
 
     public AgentTaskDetailView startForEvent(UUID eventId) {
         FaultEvent event = faultEventService.requireEvent(eventId);
-        if (taskRepository.existsByFaultEventIdAndStatusIn(eventId, ACTIVE_STATUSES)) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    "该事件已有诊断任务正在执行，请等待完成或查询现有任务");
-        }
+        ensureNoActiveAgentTask(eventId);
         DiagnosisTask task = createTask(eventId, "AGENT");
         markEventDiagnosing(event);
         taskRunner.run(task.getId());
@@ -66,11 +65,24 @@ public class AgentDiagnosisService {
         }
         // 先把关联事件校验通过，再创建任务，避免留下永远 PENDING 的孤儿任务。
         FaultEvent event = faultEventService.requireEvent(original.getFaultEventId());
+        ensureNoActiveAgentTask(original.getFaultEventId());
         // 重试创建新任务，原任务的成功/失败记录保持不变，便于审计历史。
         DiagnosisTask retry = createTask(original.getFaultEventId(), "AGENT_RETRY");
         markEventDiagnosing(event);
         taskRunner.run(retry.getId());
         return detail(retry.getId());
+    }
+
+    /**
+     * 同一故障事件同一时间只允许一个由 Agent 触发的活跃任务。
+     * 手工证据采集任务不在此列，可以并行执行。
+     */
+    private void ensureNoActiveAgentTask(UUID eventId) {
+        if (taskRepository.existsByFaultEventIdAndTriggerSourceInAndStatusIn(
+                eventId, AGENT_TRIGGER_SOURCES, ACTIVE_STATUSES)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "该事件已有诊断任务正在执行，请等待完成或查询现有任务");
+        }
     }
 
     /**
@@ -142,7 +154,13 @@ public class AgentDiagnosisService {
         task.setTriggerSource(triggerSource);
         task.setGoal("由 LLM Agent 基于真实日志与指标证据自主调查故障事件 " + eventId);
         task.setCreatedBy("rca-console");
-        return taskRepository.save(task);
+        try {
+            return taskRepository.save(task);
+        } catch (DataIntegrityViolationException ex) {
+            // 数据库活跃任务唯一索引是并发场景的最终兜底；先查询再插入仍可能发生竞争。
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "该事件已有诊断任务正在执行，请等待完成或查询现有任务");
+        }
     }
 
     private DiagnosisTask requireTask(UUID taskId) {

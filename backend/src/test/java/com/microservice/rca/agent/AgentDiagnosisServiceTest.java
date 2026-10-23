@@ -2,7 +2,9 @@ package com.microservice.rca.agent;
 
 import static com.microservice.rca.agent.AgentTestSupport.json;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -18,10 +20,14 @@ import com.microservice.rca.diagnosis.repository.ToolInvocationRepository;
 import com.microservice.rca.diagnosis.service.FaultEventService;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 class AgentDiagnosisServiceTest {
 
@@ -86,6 +92,58 @@ class AgentDiagnosisServiceTest {
         assertThat(original.getFailureReason()).isEqualTo("瞬时失败");
         verify(faultEventService).updateStatus(event.getId(), FaultEventStatus.DIAGNOSING);
         verify(taskRunner).run(retry.getId());
+    }
+
+    @Test
+    void startRejectsWhenActiveAgentTaskExists() {
+        when(taskRepository.existsByFaultEventIdAndTriggerSourceInAndStatusIn(
+                eq(event.getId()), eq(Set.of("AGENT", "AGENT_RETRY")),
+                eq(Set.of(DiagnosisStatus.PENDING, DiagnosisStatus.RUNNING))))
+                .thenReturn(true);
+
+        assertThatThrownBy(() -> service.startForEvent(event.getId()))
+                .isInstanceOfSatisfying(ResponseStatusException.class,
+                        ex -> assertThat(ex.getStatusCode()).isEqualTo(HttpStatus.CONFLICT));
+        assertThat(created.get()).isNull();
+        verify(taskRunner, never()).run(any(UUID.class));
+    }
+
+    @Test
+    void startAllowsWhenOnlyManualEvidenceIsRunning() {
+        // MANUAL_EVIDENCE 不参与活跃 Agent 查询，因此手工采集不会阻塞 AI 诊断。
+        AgentTaskDetailView detail = service.startForEvent(event.getId());
+
+        assertThat(detail.id()).isEqualTo(created.get().getId());
+        assertThat(created.get().getStatus()).isEqualTo(DiagnosisStatus.PENDING);
+        verify(taskRepository).existsByFaultEventIdAndTriggerSourceInAndStatusIn(
+                event.getId(), Set.of("AGENT", "AGENT_RETRY"),
+                Set.of(DiagnosisStatus.PENDING, DiagnosisStatus.RUNNING));
+        verify(taskRunner).run(created.get().getId());
+    }
+
+    @Test
+    void retryRejectsWhenAnotherAgentTaskIsActive() {
+        when(taskRepository.existsByFaultEventIdAndTriggerSourceInAndStatusIn(
+                event.getId(), Set.of("AGENT", "AGENT_RETRY"),
+                Set.of(DiagnosisStatus.PENDING, DiagnosisStatus.RUNNING)))
+                .thenReturn(true);
+
+        assertThatThrownBy(() -> service.retry(original.getId()))
+                .isInstanceOfSatisfying(ResponseStatusException.class,
+                        ex -> assertThat(ex.getStatusCode()).isEqualTo(HttpStatus.CONFLICT));
+        assertThat(created.get()).isNull();
+        verify(taskRunner, never()).run(any(UUID.class));
+    }
+
+    @Test
+    void concurrentInsertConflictIsReturnedAs409() {
+        when(taskRepository.save(any(DiagnosisTask.class)))
+                .thenThrow(new DataIntegrityViolationException("active agent task exists"));
+
+        assertThatThrownBy(() -> service.startForEvent(event.getId()))
+                .isInstanceOfSatisfying(ResponseStatusException.class,
+                        ex -> assertThat(ex.getStatusCode()).isEqualTo(HttpStatus.CONFLICT));
+        verify(taskRunner, never()).run(any(UUID.class));
     }
 
     @Test
