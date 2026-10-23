@@ -148,7 +148,7 @@ class DeepSeekAgentModelClientTest {
                     assertThat(ex.getFailureType()).isEqualTo("TIMEOUT");
                     assertThat(ex.getMessage()).contains("预算已耗尽");
                 });
-        assertThat(invoked).isFalse();
+        assertThat(invoked.get()).isFalse();
     }
 
     @Test
