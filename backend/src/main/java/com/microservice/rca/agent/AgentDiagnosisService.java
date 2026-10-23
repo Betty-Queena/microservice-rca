@@ -12,9 +12,13 @@ import com.microservice.rca.diagnosis.domain.ToolInvocation;
 import com.microservice.rca.diagnosis.repository.DiagnosisTaskRepository;
 import com.microservice.rca.diagnosis.repository.ToolInvocationRepository;
 import com.microservice.rca.diagnosis.service.FaultEventService;
+import java.time.Instant;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.core.task.TaskRejectedException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -26,6 +30,8 @@ import org.springframework.web.server.ResponseStatusException;
  */
 @Service
 public class AgentDiagnosisService {
+
+    private static final Logger log = LoggerFactory.getLogger(AgentDiagnosisService.class);
 
     private static final Set<DiagnosisStatus> ACTIVE_STATUSES =
             Set.of(DiagnosisStatus.PENDING, DiagnosisStatus.RUNNING);
@@ -54,7 +60,7 @@ public class AgentDiagnosisService {
         ensureNoActiveAgentTask(eventId);
         DiagnosisTask task = createTask(eventId, "AGENT");
         markEventDiagnosing(event);
-        taskRunner.run(task.getId());
+        submit(task, event);
         return detail(task.getId());
     }
 
@@ -69,8 +75,41 @@ public class AgentDiagnosisService {
         // 重试创建新任务，原任务的成功/失败记录保持不变，便于审计历史。
         DiagnosisTask retry = createTask(original.getFaultEventId(), "AGENT_RETRY");
         markEventDiagnosing(event);
-        taskRunner.run(retry.getId());
+        submit(retry, event);
         return detail(retry.getId());
+    }
+
+    /**
+     * 提交异步执行。线程池拒绝时任务已经写入数据库，必须立即落为 FAILED，
+     * 不能留下永远 PENDING 的任务，也不能让事件停留在 DIAGNOSING。
+     */
+    private void submit(DiagnosisTask task, FaultEvent event) {
+        try {
+            taskRunner.run(task.getId());
+        } catch (TaskRejectedException ex) {
+            log.warn("Agent task {} rejected by executor: {}", task.getId(), ex.getMessage());
+            markFailedBeforeStart(task, "诊断线程池已满，任务未能启动");
+            try {
+                faultEventService.restoreOpenIfDiagnosing(event.getId());
+            } catch (Exception restoreEx) {
+                log.warn("Failed to restore event {} after task rejection",
+                        event.getId(), restoreEx);
+            }
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                    "诊断任务队列已满，请稍后重试");
+        }
+    }
+
+    private void markFailedBeforeStart(DiagnosisTask task, String reason) {
+        task.setStatus(DiagnosisStatus.FAILED);
+        task.setFailureReason(reason);
+        task.setCompletedAt(Instant.now());
+        try {
+            taskRepository.save(task);
+        } catch (Exception ex) {
+            // 持久化失败时只能记录日志，由启动恢复在下次启动时兜底。
+            log.error("Failed to persist rejected task {} as FAILED", task.getId(), ex);
+        }
     }
 
     /**

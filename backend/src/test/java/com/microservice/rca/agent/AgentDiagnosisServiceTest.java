@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -25,6 +26,7 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.core.task.TaskRejectedException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
@@ -144,6 +146,23 @@ class AgentDiagnosisServiceTest {
                 .isInstanceOfSatisfying(ResponseStatusException.class,
                         ex -> assertThat(ex.getStatusCode()).isEqualTo(HttpStatus.CONFLICT));
         verify(taskRunner, never()).run(any(UUID.class));
+    }
+
+    @Test
+    void marksFailedAndRestoresEventWhenExecutorRejects() {
+        doThrow(new TaskRejectedException("agent executor queue is full"))
+                .when(taskRunner).run(any(UUID.class));
+
+        assertThatThrownBy(() -> service.startForEvent(event.getId()))
+                .isInstanceOfSatisfying(ResponseStatusException.class,
+                        ex -> assertThat(ex.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE));
+
+        DiagnosisTask rejected = created.get();
+        assertThat(rejected).isNotNull();
+        assertThat(rejected.getStatus()).isEqualTo(DiagnosisStatus.FAILED);
+        assertThat(rejected.getFailureReason()).contains("线程池");
+        assertThat(rejected.getCompletedAt()).isNotNull();
+        verify(faultEventService).restoreOpenIfDiagnosing(event.getId());
     }
 
     @Test

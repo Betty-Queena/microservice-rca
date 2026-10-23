@@ -161,6 +161,18 @@ public class FaultEventService {
         return toView(eventRepository.save(event));
     }
 
+    /**
+     * 仅当事件仍为 DIAGNOSING 时恢复为 OPEN。
+     * 使用条件更新，避免覆盖人工同时写入的 RESOLVED/CLOSED。
+     *
+     * @return 是否实际发生更新
+     */
+    @Transactional
+    public boolean restoreOpenIfDiagnosing(UUID eventId) {
+        return eventRepository.updateStatusIfCurrent(
+                eventId, FaultEventStatus.DIAGNOSING, FaultEventStatus.OPEN, Instant.now()) > 0;
+    }
+
     @Transactional
     public FaultEventView saveEvidence(UUID eventId, String evidenceJson, Instant collectedAt) {
         FaultEvent event = requireEvent(eventId);

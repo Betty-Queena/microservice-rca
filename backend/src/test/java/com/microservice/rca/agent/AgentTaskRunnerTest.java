@@ -6,6 +6,7 @@ import static com.microservice.rca.agent.AgentTestSupport.tool;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -27,6 +28,7 @@ import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.dao.DataIntegrityViolationException;
 
 class AgentTaskRunnerTest {
 
@@ -225,6 +227,21 @@ class AgentTaskRunnerTest {
         assertThat(saved.getDecisionTrace()).contains("AGENT_ERROR");
         assertThat(saved.getRootCause()).isNull();
         verify(orchestrator).diagnose(any());
+    }
+
+    @Test
+    void persistsFailedWhenInitialRunningSaveFails() {
+        when(taskRepository.save(any(DiagnosisTask.class)))
+                .thenThrow(new DataIntegrityViolationException("database unavailable"))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        runner.run(task.getId());
+
+        DiagnosisTask saved = lastSaved();
+        assertThat(saved.getStatus()).isEqualTo(DiagnosisStatus.FAILED);
+        assertThat(saved.getFailureReason()).contains("Agent 执行异常");
+        assertThat(saved.getCompletedAt()).isNotNull();
+        verify(orchestrator, never()).diagnose(any());
     }
 
     private DiagnosisTask lastSaved() {

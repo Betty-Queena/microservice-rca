@@ -51,18 +51,20 @@ public class AgentTaskRunner {
 
     @Async("agentExecutor")
     public void run(UUID taskId) {
-        DiagnosisTask task = taskRepository.findById(taskId).orElse(null);
-        if (task == null) {
-            log.warn("Agent task {} not found, skip", taskId);
-            return;
-        }
-
-        task.setStatus(DiagnosisStatus.RUNNING);
-        task.setStartedAt(Instant.now());
-        task.setFailureReason(null);
-        taskRepository.save(task);
-
+        DiagnosisTask task = null;
         try {
+            task = taskRepository.findById(taskId).orElse(null);
+            if (task == null) {
+                log.warn("Agent task {} not found, skip", taskId);
+                return;
+            }
+
+            // 首次 RUNNING 保存也纳入异常保护：保存失败时任务不能永久停留在 PENDING。
+            task.setStatus(DiagnosisStatus.RUNNING);
+            task.setStartedAt(Instant.now());
+            task.setFailureReason(null);
+            taskRepository.save(task);
+
             FaultEvent event = eventRepository.findById(task.getFaultEventId()).orElse(null);
             if (event == null) {
                 fail(task, "故障事件不存在，无法执行 Agent 诊断", null, null);
@@ -79,8 +81,15 @@ public class AgentTaskRunner {
         } catch (Exception ex) {
             String reason = "Agent 执行异常: " + ex.getClass().getSimpleName()
                     + (ex.getMessage() != null ? " - " + ex.getMessage() : "");
-            fail(task, reason, currentTrace(task), orchestratorModelName());
             log.warn("Agent task {} failed: {}", taskId, ex.toString());
+            if (task != null) {
+                try {
+                    fail(task, reason, currentTrace(task), orchestratorModelName());
+                } catch (Exception persistEx) {
+                    // 失败状态也无法持久化时，只能留给启动恢复兜底。
+                    log.error("Failed to persist failure state for agent task {}", taskId, persistEx);
+                }
+            }
         }
     }
 
