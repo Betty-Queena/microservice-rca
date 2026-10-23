@@ -26,7 +26,7 @@ const form = reactive({
   faultType: 'DELAY',
   delayMs: 3500,
   durationSeconds: 120,
-  note: 'Day 2 故障注入实验'
+  note: '真实故障注入实验'
 })
 
 const checkout = reactive({

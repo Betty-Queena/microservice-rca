@@ -10,17 +10,17 @@ const planned = computed(() => route.meta?.planned || [])
   <div class="page-stack">
     <section class="hero">
       <div>
-        <div class="hero-eyebrow">MODULE PLACEHOLDER</div>
+        <div class="hero-eyebrow">DETAIL ENTRY</div>
         <h1>{{ route.meta.title }}</h1>
         <p>{{ route.meta.description }}</p>
       </div>
-      <el-tag type="info" effect="plain" size="large">待开发</el-tag>
+      <el-tag type="info" effect="plain" size="large">详情页查看</el-tag>
     </section>
 
     <el-card shadow="never" class="panel-card">
-      <el-empty :description="route.meta.emptyText || '该模块将在后续迭代中实现'">
+      <el-empty :description="route.meta.emptyText || '请从故障事件详情页查看相关能力'">
         <div class="planned-list">
-          <div class="planned-title">计划能力</div>
+          <div class="planned-title">已具备能力（位于故障事件详情）</div>
           <ul>
             <li v-for="item in planned" :key="item">{{ item }}</li>
           </ul>

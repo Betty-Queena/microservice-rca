@@ -38,6 +38,35 @@ const event = computed(() => detail.value?.event || null)
 const tasks = computed(() => detail.value?.diagnosisTasks || [])
 const evidence = computed(() => event.value?.evidence || null)
 const evidenceTools = computed(() => evidence.value?.tools || [])
+const evidenceToolCount = computed(() => evidenceTools.value.length)
+const evidenceSuccessCount = computed(
+  () => evidenceTools.value.filter((item) => item.success === true).length
+)
+const evidenceState = computed(() => {
+  if (!evidence.value) return 'none'
+  if (evidenceToolCount.value === 0) return 'unknown'
+  if (evidenceSuccessCount.value === evidenceToolCount.value) return 'success'
+  if (evidenceSuccessCount.value > 0) return 'partial'
+  return 'failed'
+})
+const evidenceAlertType = computed(
+  () => ({ success: 'success', partial: 'warning', failed: 'error', unknown: 'info' })[evidenceState.value]
+    || 'info'
+)
+const evidenceAlertTitle = computed(() => {
+  const collectedAt = formatTime(event.value?.evidenceCollectedAt)
+  switch (evidenceState.value) {
+    case 'success':
+      return `已采集证据 · ${collectedAt}`
+    case 'partial':
+      return `证据采集部分成功 · ${collectedAt}`
+    case 'failed':
+      return `证据采集失败 · ${collectedAt}`
+    default:
+      return `已采集证据（工具结果未知） · ${collectedAt}`
+  }
+})
+
 const logsTool = computed(() => evidenceTools.value.find((item) => item.toolName === 'query_logs') || null)
 const metricsTool = computed(
   () => evidenceTools.value.find((item) => item.toolName === 'query_metrics') || null
@@ -236,15 +265,31 @@ async function handleCollect() {
   collecting.value = true
   error.value = ''
   try {
-    await collectFaultEventEvidence(route.params.eventId, {
+    const result = await collectFaultEventEvidence(route.params.eventId, {
       requestId: event.value?.requestId || undefined,
       logLimit: 100
     })
     await load()
     activeTab.value = 'logs'
-    ElMessage.success('证据采集完成，已写入事件与 tool_invocation')
+
+    const tools = Array.isArray(result?.tools) ? result.tools : []
+    const successCount = tools.filter((item) => item.success === true).length
+    if (tools.length === 0) {
+      error.value = '证据采集未返回工具结果，请查看工具调用记录'
+      ElMessage.error(error.value)
+    } else if (successCount === tools.length) {
+      ElMessage.success(`证据采集完成：${successCount}/${tools.length} 个工具成功`)
+    } else if (successCount > 0) {
+      ElMessage.warning(
+        `证据采集部分成功：${successCount}/${tools.length} 个工具成功，失败原因已记录`
+      )
+    } else {
+      error.value = `证据采集失败：${tools.length} 个工具均未成功，失败原因已记录`
+      ElMessage.error(error.value)
+    }
   } catch (ex) {
     error.value = ex.message || '证据采集失败'
+    ElMessage.error(error.value)
   } finally {
     collecting.value = false
   }
@@ -558,7 +603,13 @@ onBeforeUnmount(stopAgentPolling)
                 调用真实 query_logs / query_metrics，写入 diagnosis_task 与 tool_invocation
               </div>
             </div>
-            <el-button type="primary" :icon="Search" :loading="collecting" @click="handleCollect">
+            <el-button
+              type="primary"
+              :icon="Search"
+              :loading="collecting"
+              :disabled="collecting"
+              @click="handleCollect"
+            >
               {{ evidence ? '重新采集证据' : '采集真实证据' }}
             </el-button>
           </div>
@@ -566,15 +617,16 @@ onBeforeUnmount(stopAgentPolling)
 
         <el-alert
           v-if="evidence"
-          type="success"
+          :type="evidenceAlertType"
           :closable="false"
           show-icon
-          :title="`已采集证据 · ${formatTime(event.evidenceCollectedAt)}`"
+          :title="evidenceAlertTitle"
         >
           <div class="evidence-meta">
             <span>查询窗口：{{ formatTime(evidence.windowStart) }} ~ {{ formatTime(evidence.windowEnd) }}</span>
             <span>requestId：{{ evidence.requestId || '全部' }}</span>
             <span>服务范围：{{ evidence.serviceName || 'all' }}</span>
+            <span>工具结果：{{ evidenceSuccessCount }} / {{ evidenceToolCount }} 成功</span>
           </div>
         </el-alert>
         <el-alert

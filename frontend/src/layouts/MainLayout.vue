@@ -84,8 +84,8 @@ onBeforeUnmount(() => {
       </el-menu>
 
       <div v-show="!collapsed" class="sidebar-footer">
-        <span>Day 2 真实故障实验</span>
-        <span>v0.2.0</span>
+        <span>真实故障实验与 AI 诊断</span>
+        <span>v0.3.0</span>
       </div>
     </el-aside>
 
@@ -125,7 +125,7 @@ onBeforeUnmount(() => {
       </el-main>
 
       <el-footer class="footer">
-        页面数据来自真实接口；未实现能力统一标记为“待开发”。
+        页面数据来自真实接口；AI 诊断、任务历史与人工处置状态均可追溯。
       </el-footer>
     </el-container>
   </el-container>

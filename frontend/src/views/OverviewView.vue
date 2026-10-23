@@ -126,23 +126,23 @@ const modules = [
   {
     name: 'LLM Agent 工具调用',
     owner: 'Agent 层',
-    status: '待开发',
-    type: 'info',
-    note: '工具注册表与 Agent 契约已就绪，Day 3 接入 DeepSeek'
+    status: '已完成',
+    type: 'success',
+    note: 'DeepSeek 真实模型驱动 query_logs / query_metrics，多轮决策并受工具白名单与证据约束'
   },
   {
     name: '根因结论与辅助处置',
     owner: '诊断层',
-    status: '待开发',
-    type: 'info',
-    note: 'Day 2 不生成根因结论，避免把实验预设类型当作答案'
+    status: '已完成',
+    type: 'success',
+    note: '基于真实工具证据生成根因报告或证据不足结论，不把实验预设类型当作答案'
   },
   {
     name: '人工确认与处置闭环',
     owner: '管理面',
-    status: '待开发',
-    type: 'info',
-    note: '后续迭代'
+    status: '部分完成',
+    type: 'warning',
+    note: '支持人工更新事件状态并保留诊断历史；自动处置能力尚未实现'
   }
 ]
 </script>
@@ -261,7 +261,7 @@ const modules = [
             <div class="card-header">
               <div>
                 <div class="card-title">架构快照</div>
-                <div class="card-subtitle">Day 2 已落地的组件</div>
+                <div class="card-subtitle">当前已落地的组件</div>
               </div>
               <el-icon :size="18" color="#2563eb"><Connection /></el-icon>
             </div>
@@ -282,11 +282,11 @@ const modules = [
             </li>
             <li>
               <strong>数据层</strong>
-              <span>PostgreSQL 16 + Flyway V2；故障事件、诊断任务与工具审计</span>
+              <span>PostgreSQL 16 + Flyway V3；故障事件、诊断任务与工具审计</span>
             </li>
             <li>
               <strong>Agent 层</strong>
-              <span>统一工具注册表已就绪，Day 3 接入模型</span>
+              <span>DeepSeek 真实模型、工具白名单与证据约束、任务历史与决策时间线</span>
             </li>
           </ul>
 
@@ -295,8 +295,8 @@ const modules = [
           <div class="truth-note">
             <el-icon><DataLine /></el-icon>
             <span>
-              故障注入、故障事件、日志指标和证据工具均使用真实数据。Agent 根因诊断与独立工具审计页面
-              标记为“待开发”，不展示虚构结论。
+              故障注入、故障事件、日志指标、证据工具和 Agent 诊断均使用真实数据；
+              自动处置等尚未实现的能力不在页面中伪装为已完成。
             </span>
           </div>
         </el-card>
@@ -308,7 +308,7 @@ const modules = [
         <div class="card-header">
           <div>
             <div class="card-title">模块进度</div>
-            <div class="card-subtitle">按 Day 1 实际情况标注</div>
+            <div class="card-subtitle">按当前实现状态标注</div>
           </div>
         </div>
       </template>
