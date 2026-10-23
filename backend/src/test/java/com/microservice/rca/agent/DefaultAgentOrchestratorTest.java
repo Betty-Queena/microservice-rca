@@ -266,10 +266,12 @@ class DefaultAgentOrchestratorTest {
     }
 
     @Test
-    void recordsToolTimeoutWhenBudgetIsExhaustedAfterModelDecision() {
+    void stopsBeforeToolWhenBudgetIsExhaustedAfterModelDecision() {
         DiagnosticToolRegistry registry = AgentTestSupport.registry(
                 tool("query_logs", ToolResult.success(logsOutput())));
         ToolInvocationRepository repository = AgentTestSupport.invocationRepository();
+        Duration budget = Duration.ofMillis(500);
+        AtomicReference<Duration> modelRequestTimeout = new AtomicReference<>();
         AgentModelClient slowModel = new AgentModelClient() {
             @Override
             public String modelName() {
@@ -283,8 +285,13 @@ class DefaultAgentOrchestratorTest {
 
             @Override
             public AgentModelClient.ModelResponse complete(AgentModelClient.ModelRequest request) {
+                modelRequestTimeout.set(request.timeout());
+                // 明确消耗完本次模型调用获得的剩余预算，再额外等待 200ms，
+                // 避免依赖 100ms 级别的调度边界判断。
+                long sleepMs = request.timeout() != null
+                        ? request.timeout().toMillis() + 200L : budget.toMillis() + 200L;
                 try {
-                    Thread.sleep(120L);
+                    Thread.sleep(sleepMs);
                 } catch (InterruptedException ex) {
                     Thread.currentThread().interrupt();
                 }
@@ -295,15 +302,20 @@ class DefaultAgentOrchestratorTest {
         };
 
         AgentRunResult result = orchestrator(slowModel, registry, repository, 3, 2)
-                .diagnose(input(registry, 3, 2, Duration.ofMillis(80)));
+                .diagnose(input(registry, 3, 2, budget));
 
+        // 模型返回时整体预算已耗尽：按整体超时终止，不得再解析/执行工具。
+        assertThat(modelRequestTimeout.get()).isNotNull();
+        assertThat(modelRequestTimeout.get()).isLessThanOrEqualTo(budget);
         assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.FAILED);
         assertThat(result.failureReason()).contains("超时");
         assertThat(result.decisionTrace()).anySatisfy(entry -> {
-            assertThat(entry.get("type")).isEqualTo("TOOL_EXECUTION");
-            assertThat(entry.get("status")).isEqualTo("TIMEOUT");
-            assertThat(entry.get("errorType")).isEqualTo("TOOL_TIMEOUT");
+            assertThat(entry.get("type")).isEqualTo("MODEL_DECISION");
+            assertThat(entry.get("decision")).isEqualTo("DEADLINE_EXCEEDED");
+            assertThat(entry.get("status")).isEqualTo("REJECTED");
         });
+        assertThat(result.decisionTrace())
+                .noneMatch(entry -> "TOOL_EXECUTION".equals(entry.get("type")));
         verify(repository, never()).save(any(ToolInvocation.class));
     }
 
