@@ -21,7 +21,7 @@ public interface FaultEventRepository extends JpaRepository<FaultEvent, UUID>,
     @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query("""
             update FaultEvent e
-               set e.status = :target, e.updatedAt = :now
+               set e.status = :target, e.updatedAt = :now, e.version = e.version + 1
              where e.id = :eventId and e.status = :expected
             """)
     int updateStatusIfCurrent(@Param("eventId") UUID eventId,
