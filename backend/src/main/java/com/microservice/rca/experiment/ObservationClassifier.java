@@ -47,6 +47,8 @@ public final class ObservationClassifier {
                         FaultSeverity.ERROR, "订单服务无法连接库存服务（下游错误类型 CONNECTION_ERROR）");
                 case "PROTOCOL_ERROR" -> new Observation("DOWNSTREAM_PROTOCOL_ERROR", true,
                         FaultSeverity.ERROR, "库存服务响应格式不符合预期（下游错误类型 PROTOCOL_ERROR）");
+                case "HTTP_4XX" -> new Observation("REQUEST_REJECTED", false, FaultSeverity.INFO,
+                        "订单服务拒绝请求（下游返回 HTTP 4xx 业务错误），不记为系统故障");
                 default -> new Observation("DOWNSTREAM_ERROR", true, FaultSeverity.ERROR,
                         "订单服务调用下游失败（HTTP " + status + "，下游错误类型 " + type + "）");
             };

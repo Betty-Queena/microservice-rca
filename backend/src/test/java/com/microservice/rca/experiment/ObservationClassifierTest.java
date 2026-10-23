@@ -68,6 +68,26 @@ class ObservationClassifierTest {
     }
 
     @Test
+    void missingSkuIsRequestRejectedInsteadOfSystemFault() {
+        ObservationClassifier.Observation observation =
+                ObservationClassifier.classify(404, "HTTP_4XX", 18, SLOW_THRESHOLD);
+
+        assertThat(observation.outcome()).isEqualTo("REQUEST_REJECTED");
+        assertThat(observation.faultObserved()).isFalse();
+        assertThat(observation.severity()).isEqualTo(FaultSeverity.INFO);
+    }
+
+    @Test
+    void downstream4xxWrappedAs502IsStillNotAFault() {
+        ObservationClassifier.Observation observation =
+                ObservationClassifier.classify(502, "HTTP_4XX", 18, SLOW_THRESHOLD);
+
+        assertThat(observation.outcome()).isEqualTo("REQUEST_REJECTED");
+        assertThat(observation.faultObserved()).isFalse();
+        assertThat(observation.severity()).isEqualTo(FaultSeverity.INFO);
+    }
+
+    @Test
     void orderServiceUnreachableIsRecorded() {
         ObservationClassifier.Observation observation =
                 ObservationClassifier.classify(null, null, 2000, SLOW_THRESHOLD);

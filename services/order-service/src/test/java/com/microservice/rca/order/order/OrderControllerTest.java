@@ -4,9 +4,11 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.microservice.rca.order.exception.InventoryRequestRejectedException;
 import com.microservice.rca.order.exception.InventoryUnavailableException;
 import com.microservice.rca.order.inventory.InventoryClient;
 import com.microservice.rca.order.inventory.InventoryReservation;
@@ -58,6 +60,33 @@ class OrderControllerTest {
                         .content("{\"sku\":\"SKU-1001\",\"quantity\":1}"))
                 .andExpect(status().isBadGateway())
                 .andExpect(jsonPath("$.code").value(502));
+    }
+
+    @Test
+    void preservesNotFoundWhenSkuDoesNotExist() throws Exception {
+        when(inventoryClient.reserve(anyString(), eq(1), anyString()))
+                .thenThrow(new InventoryRequestRejectedException(404, "商品不存在: UNKNOWN"));
+
+        mockMvc.perform(post("/api/orders/checkout")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sku\":\"UNKNOWN\",\"quantity\":1}"))
+                .andExpect(status().isNotFound())
+                .andExpect(header().string("X-Downstream-Error-Type", "HTTP_4XX"))
+                .andExpect(jsonPath("$.code").value(404))
+                .andExpect(jsonPath("$.message").value("商品不存在: UNKNOWN"));
+    }
+
+    @Test
+    void preservesBadRequestWhenDownstreamRejectsRequest() throws Exception {
+        when(inventoryClient.reserve(anyString(), eq(1), anyString()))
+                .thenThrow(new InventoryRequestRejectedException(400, "quantity 必须大于 0"));
+
+        mockMvc.perform(post("/api/orders/checkout")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sku\":\"SKU-1001\",\"quantity\":1}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value(400))
+                .andExpect(jsonPath("$.message").value("quantity 必须大于 0"));
     }
 
     @Test

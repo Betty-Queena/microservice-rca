@@ -1,6 +1,7 @@
 package com.microservice.rca.order.inventory;
 
 import com.microservice.rca.order.exception.InventoryRejectedException;
+import com.microservice.rca.order.exception.InventoryRequestRejectedException;
 import com.microservice.rca.order.exception.InventoryUnavailableException;
 import com.microservice.rca.order.observability.RequestIdContext;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -62,6 +63,9 @@ public class InventoryClient {
             int status = ex.getStatusCode().value();
             if (status == 409) {
                 throw new InventoryRejectedException(extractMessage(ex));
+            }
+            if (status == 400 || status == 404 || status == 422) {
+                throw new InventoryRequestRejectedException(status, extractMessage(ex));
             }
             if (status >= 500) {
                 throw new InventoryUnavailableException("库存服务调用失败: HTTP " + status, "HTTP_5XX");

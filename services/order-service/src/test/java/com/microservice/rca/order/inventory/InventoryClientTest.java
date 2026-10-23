@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.microservice.rca.order.exception.InventoryRejectedException;
+import com.microservice.rca.order.exception.InventoryRequestRejectedException;
 import com.microservice.rca.order.exception.InventoryUnavailableException;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -70,6 +71,30 @@ class InventoryClientTest {
                 .hasMessageContaining("库存不足");
     }
 
+    @Test
+    void preservesDownstream404AsRequestRejected() throws Exception {
+        server = start(404, "{\"code\":404,\"message\":\"商品不存在: UNKNOWN\",\"data\":null}", 0);
+        InventoryClient client = client(1000);
+
+        assertThatThrownBy(() -> client.reserve("UNKNOWN", 1, "ORD-1"))
+                .isInstanceOf(InventoryRequestRejectedException.class)
+                .hasMessageContaining("商品不存在")
+                .satisfies(ex -> assertThat(((InventoryRequestRejectedException) ex).getStatus())
+                        .isEqualTo(404));
+    }
+
+    @Test
+    void preservesDownstream400AsRequestRejected() throws Exception {
+        server = start(400, "{\"code\":400,\"message\":\"quantity 必须大于 0\",\"data\":null}", 0);
+        InventoryClient client = client(1000);
+
+        assertThatThrownBy(() -> client.reserve("SKU-1001", 0, "ORD-1"))
+                .isInstanceOf(InventoryRequestRejectedException.class)
+                .hasMessageContaining("必须大于 0")
+                .satisfies(ex -> assertThat(((InventoryRequestRejectedException) ex).getStatus())
+                        .isEqualTo(400));
+    }
+
     private InventoryClient client(int readTimeoutMs) {
         return new InventoryClient(
                 RestClient.builder(),
@@ -81,7 +106,7 @@ class InventoryClientTest {
 
     private HttpServer start(int status, String body, long delayMs) throws IOException {
         HttpServer httpServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        httpServer.createContext("/api/inventory/SKU-1001/reserve", exchange -> {
+        httpServer.createContext("/api/inventory/", exchange -> {
             if (delayMs > 0) {
                 try {
                     Thread.sleep(delayMs);

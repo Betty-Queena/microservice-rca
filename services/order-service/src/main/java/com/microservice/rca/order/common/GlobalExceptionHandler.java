@@ -1,6 +1,7 @@
 package com.microservice.rca.order.common;
 
 import com.microservice.rca.order.exception.InventoryRejectedException;
+import com.microservice.rca.order.exception.InventoryRequestRejectedException;
 import com.microservice.rca.order.exception.InventoryUnavailableException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,6 +30,14 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiResponse<Void>> handleInventoryRejected(InventoryRejectedException ex) {
         return ResponseEntity.status(HttpStatus.CONFLICT)
                 .body(ApiResponse.error(409, ex.getMessage()));
+    }
+
+    @ExceptionHandler(InventoryRequestRejectedException.class)
+    public ResponseEntity<ApiResponse<Void>> handleInventoryRequestRejected(InventoryRequestRejectedException ex) {
+        log.info("Inventory request rejected [HTTP {}]: {}", ex.getStatus(), ex.getMessage());
+        return ResponseEntity.status(HttpStatus.valueOf(ex.getStatus()))
+                .header("X-Downstream-Error-Type", "HTTP_4XX")
+                .body(ApiResponse.error(ex.getStatus(), ex.getMessage()));
     }
 
     @ExceptionHandler(InventoryUnavailableException.class)
