@@ -22,12 +22,16 @@ import com.microservice.rca.diagnosis.domain.FaultEvent;
 import com.microservice.rca.diagnosis.domain.FaultSeverity;
 import com.microservice.rca.diagnosis.domain.ToolInvocation;
 import com.microservice.rca.diagnosis.repository.ToolInvocationRepository;
+import com.microservice.rca.tools.DiagnosticTool;
 import com.microservice.rca.tools.DiagnosticToolRegistry;
+import com.microservice.rca.tools.ToolExecutionContext;
 import com.microservice.rca.tools.ToolResult;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 class DefaultAgentOrchestratorTest {
@@ -201,6 +205,106 @@ class DefaultAgentOrchestratorTest {
         assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.FAILED);
         assertThat(result.failureReason()).contains("超时");
         assertThat(result.report()).isNull();
+        assertThat(result.decisionTrace()).anySatisfy(entry -> {
+            assertThat(entry.get("type")).isEqualTo("MODEL_DECISION");
+            assertThat(entry.get("errorType")).isEqualTo("TIMEOUT");
+        });
+    }
+
+    @Test
+    void passesRemainingBudgetToModelAndToolCalls() {
+        AtomicReference<Duration> toolTimeout = new AtomicReference<>();
+        DiagnosticTool capturingTool = new DiagnosticTool() {
+            @Override
+            public String name() {
+                return "query_logs";
+            }
+
+            @Override
+            public String description() {
+                return "capture tool timeout";
+            }
+
+            @Override
+            public ToolResult execute(ToolExecutionContext context) {
+                toolTimeout.set(context.timeout());
+                return ToolResult.success(logsOutput());
+            }
+        };
+        DiagnosticToolRegistry registry = AgentTestSupport.registry(capturingTool);
+        AgentTestSupport.ScriptedModelClient model = new AgentTestSupport.ScriptedModelClient(
+                true,
+                callTool("query_logs", Map.of("service", "all", "limit", 20)),
+                insufficientEvidence());
+
+        AgentRunResult result = orchestrator(model, registry, AgentTestSupport.invocationRepository(), 3, 2)
+                .diagnose(input(registry, 3, 2, Duration.ofSeconds(60)));
+
+        assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.INSUFFICIENT_EVIDENCE);
+        Duration modelTimeout = model.requests().get(0).timeout();
+        assertThat(modelTimeout).isNotNull();
+        assertThat(modelTimeout).isPositive();
+        assertThat(modelTimeout).isLessThanOrEqualTo(Duration.ofSeconds(60));
+        assertThat(toolTimeout.get()).isNotNull();
+        assertThat(toolTimeout.get()).isPositive();
+        assertThat(toolTimeout.get()).isLessThanOrEqualTo(Duration.ofSeconds(60));
+    }
+
+    @Test
+    void stopsImmediatelyWhenOverallBudgetIsAlreadyExhausted() {
+        DiagnosticToolRegistry registry = AgentTestSupport.registry(
+                tool("query_logs", ToolResult.success(logsOutput())));
+        AgentTestSupport.ScriptedModelClient model = new AgentTestSupport.ScriptedModelClient(
+                true, insufficientEvidence());
+
+        AgentRunResult result = orchestrator(model, registry, AgentTestSupport.invocationRepository(), 3, 2)
+                .diagnose(input(registry, 3, 2, Duration.ZERO));
+
+        assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.FAILED);
+        assertThat(result.failureReason()).contains("超时");
+        assertThat(model.requests()).isEmpty();
+    }
+
+    @Test
+    void recordsToolTimeoutWhenBudgetIsExhaustedAfterModelDecision() {
+        DiagnosticToolRegistry registry = AgentTestSupport.registry(
+                tool("query_logs", ToolResult.success(logsOutput())));
+        ToolInvocationRepository repository = AgentTestSupport.invocationRepository();
+        AgentModelClient slowModel = new AgentModelClient() {
+            @Override
+            public String modelName() {
+                return "slow-model";
+            }
+
+            @Override
+            public boolean isConfigured() {
+                return true;
+            }
+
+            @Override
+            public AgentModelClient.ModelResponse complete(AgentModelClient.ModelRequest request) {
+                try {
+                    Thread.sleep(120L);
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                }
+                return new AgentModelClient.ModelResponse(
+                        callTool("query_logs", Map.of("service", "all", "limit", 20)),
+                        modelName(), 12, 8, true);
+            }
+        };
+
+        AgentRunResult result = orchestrator(slowModel, registry, repository, 3, 2)
+                .diagnose(input(registry, 3, 2, Duration.ofMillis(80)));
+
+        assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.FAILED);
+        assertThat(result.failureReason()).contains("超时");
+        assertThat(result.decisionTrace()).anySatisfy(entry -> {
+            assertThat(entry.get("type")).isEqualTo("TOOL_EXECUTION");
+            assertThat(entry.get("status")).isEqualTo("TIMEOUT");
+            assertThat(entry.get("errorType")).isEqualTo("TOOL_TIMEOUT");
+        });
+        verify(repository, never()).save(any(ToolInvocation.class));
     }
 
     @Test

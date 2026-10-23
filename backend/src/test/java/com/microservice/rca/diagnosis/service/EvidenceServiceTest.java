@@ -9,6 +9,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -20,9 +21,11 @@ import com.microservice.rca.diagnosis.domain.DiagnosisStatus;
 import com.microservice.rca.diagnosis.domain.DiagnosisTask;
 import com.microservice.rca.diagnosis.domain.FaultEvent;
 import com.microservice.rca.diagnosis.repository.DiagnosisTaskRepository;
+import com.microservice.rca.tools.ToolExecutionContext;
 import com.microservice.rca.tools.ToolInvocationService;
 import com.microservice.rca.tools.ToolInvocationService.ToolInvocationOutcome;
 import com.microservice.rca.tools.ToolResult;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -30,6 +33,7 @@ import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.springframework.dao.DataIntegrityViolationException;
 
@@ -133,6 +137,21 @@ class EvidenceServiceTest {
         assertThat(last.getStatus()).isEqualTo(DiagnosisStatus.FAILED);
         assertThat(last.getFailureReason()).contains("所有诊断工具调用失败");
         verify(faultEventService).saveEvidence(eq(eventId), anyString(), any(Instant.class));
+    }
+
+    @Test
+    void passesManualToolTimeoutToToolInvocation() {
+        when(toolInvocationService.invoke(any(), eq("query_logs"), any(), eq(1)))
+                .thenReturn(outcome("query_logs", true));
+        when(toolInvocationService.invoke(any(), eq("query_metrics"), any(), eq(2)))
+                .thenReturn(outcome("query_metrics", true));
+
+        service.collect(eventId, null);
+
+        ArgumentCaptor<ToolExecutionContext> captor = ArgumentCaptor.forClass(ToolExecutionContext.class);
+        verify(toolInvocationService, times(2)).invoke(any(), anyString(), captor.capture(), anyInt());
+        assertThat(captor.getAllValues()).allSatisfy(context ->
+                assertThat(context.timeout()).isEqualTo(Duration.ofSeconds(15)));
     }
 
     private ToolInvocationOutcome outcome(String toolName, boolean success) {

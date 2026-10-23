@@ -1,6 +1,9 @@
 package com.microservice.rca.observability;
 
+import java.net.SocketTimeoutException;
+import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.springframework.beans.factory.annotation.Value;
@@ -19,15 +22,19 @@ public class ObservabilityClient {
 
     private static final String ORDER_SERVICE = "order-service";
     private static final String INVENTORY_SERVICE = "inventory-service";
+    private static final int DEFAULT_CONNECT_TIMEOUT_MS = 2000;
+    private static final int DEFAULT_READ_TIMEOUT_MS = 5000;
 
-    private final RestClient orderClient;
-    private final RestClient inventoryClient;
+    private final RestClient.Builder builder;
+    private final String orderBaseUrl;
+    private final String inventoryBaseUrl;
 
     public ObservabilityClient(RestClient.Builder builder,
                                @Value("${services.order-base-url:http://localhost:8081}") String orderBaseUrl,
                                @Value("${services.inventory-base-url:http://localhost:8082}") String inventoryBaseUrl) {
-        this.orderClient = buildClient(builder, orderBaseUrl);
-        this.inventoryClient = buildClient(builder, inventoryBaseUrl);
+        this.builder = builder.clone();
+        this.orderBaseUrl = orderBaseUrl;
+        this.inventoryBaseUrl = inventoryBaseUrl;
     }
 
     public List<ServiceQueryResult> queryLogs(String targetService,
@@ -35,15 +42,56 @@ public class ObservabilityClient {
                                               Instant end,
                                               String requestId,
                                               int limit) {
-        return resolveServices(targetService).stream()
-                .map(service -> queryOne(service, "/api/observability/logs", start, end, requestId, limit))
-                .toList();
+        return queryServices(targetService, "/api/observability/logs", start, end, requestId, limit, null);
+    }
+
+    /**
+     * timeout 为整次工具调用的预算；多个服务串行查询时共享该预算，
+     * 单次 HTTP 读超时不超过当前剩余时间。
+     */
+    public List<ServiceQueryResult> queryLogs(String targetService,
+                                              Instant start,
+                                              Instant end,
+                                              String requestId,
+                                              int limit,
+                                              Duration timeout) {
+        return queryServices(targetService, "/api/observability/logs", start, end, requestId, limit, timeout);
     }
 
     public List<ServiceQueryResult> queryMetrics(String targetService, Instant start, Instant end) {
-        return resolveServices(targetService).stream()
-                .map(service -> queryOne(service, "/api/observability/metrics", start, end, null, 0))
-                .toList();
+        return queryServices(targetService, "/api/observability/metrics", start, end, null, 0, null);
+    }
+
+    public List<ServiceQueryResult> queryMetrics(String targetService,
+                                                 Instant start,
+                                                 Instant end,
+                                                 Duration timeout) {
+        return queryServices(targetService, "/api/observability/metrics", start, end, null, 0, timeout);
+    }
+
+    private List<ServiceQueryResult> queryServices(String targetService,
+                                                   String path,
+                                                   Instant start,
+                                                   Instant end,
+                                                   String requestId,
+                                                   int limit,
+                                                   Duration timeout) {
+        List<ServiceQueryResult> results = new ArrayList<>();
+        Instant deadline = timeout != null ? Instant.now().plus(timeout) : null;
+        for (String service : resolveServices(targetService)) {
+            Integer readTimeoutMs = null;
+            if (deadline != null) {
+                long remainingMs = Duration.between(Instant.now(), deadline).toMillis();
+                if (remainingMs <= 0) {
+                    results.add(new ServiceQueryResult(service, null,
+                            "TOOL_TIMEOUT: 工具剩余预算已耗尽"));
+                    continue;
+                }
+                readTimeoutMs = (int) Math.max(1, Math.min(DEFAULT_READ_TIMEOUT_MS, remainingMs));
+            }
+            results.add(queryOne(service, path, start, end, requestId, limit, readTimeoutMs));
+        }
+        return results;
     }
 
     private ServiceQueryResult queryOne(String service,
@@ -51,9 +99,11 @@ public class ObservabilityClient {
                                         Instant start,
                                         Instant end,
                                         String requestId,
-                                        int limit) {
+                                        int limit,
+                                        Integer readTimeoutMs) {
         try {
-            RestClient client = ORDER_SERVICE.equals(service) ? orderClient : inventoryClient;
+            RestClient client = buildClient(
+                    ORDER_SERVICE.equals(service) ? orderBaseUrl : inventoryBaseUrl, readTimeoutMs);
             Map<String, Object> body = client.get()
                     .uri(uriBuilder -> buildUri(uriBuilder, path, start, end, requestId, limit))
                     .retrieve()
@@ -74,8 +124,21 @@ public class ObservabilityClient {
             Map<String, Object> typedData = (Map<String, Object>) dataMap;
             return new ServiceQueryResult(service, typedData, null);
         } catch (Exception ex) {
-            return new ServiceQueryResult(service, null, ex.getClass().getSimpleName() + ": " + ex.getMessage());
+            String prefix = hasTimeoutCause(ex) ? "TOOL_TIMEOUT: " : "";
+            return new ServiceQueryResult(service, null,
+                    prefix + ex.getClass().getSimpleName() + ": " + ex.getMessage());
         }
+    }
+
+    private boolean hasTimeoutCause(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            if (current instanceof SocketTimeoutException) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     private java.net.URI buildUri(UriBuilder uriBuilder,
@@ -107,11 +170,12 @@ public class ObservabilityClient {
                 + "，可选值: order-service, inventory-service, all");
     }
 
-    private RestClient buildClient(RestClient.Builder builder, String baseUrl) {
+    private RestClient buildClient(String baseUrl, Integer readTimeoutMs) {
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
-        requestFactory.setConnectTimeout(2000);
-        requestFactory.setReadTimeout(5000);
-        return builder.baseUrl(baseUrl).requestFactory(requestFactory).build();
+        int readTimeout = readTimeoutMs != null ? readTimeoutMs : DEFAULT_READ_TIMEOUT_MS;
+        requestFactory.setConnectTimeout(Math.min(DEFAULT_CONNECT_TIMEOUT_MS, readTimeout));
+        requestFactory.setReadTimeout(readTimeout);
+        return builder.clone().baseUrl(baseUrl).requestFactory(requestFactory).build();
     }
 
     public record ServiceQueryResult(String serviceName, Map<String, Object> data, String error) {

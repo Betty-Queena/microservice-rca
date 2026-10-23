@@ -83,6 +83,13 @@ final class AgentTestSupport {
     static AgentOrchestrator.AgentInput input(DiagnosticToolRegistry registry,
                                               int maxModelCalls,
                                               int maxToolCalls) {
+        return input(registry, maxModelCalls, maxToolCalls, java.time.Duration.ofSeconds(60));
+    }
+
+    static AgentOrchestrator.AgentInput input(DiagnosticToolRegistry registry,
+                                              int maxModelCalls,
+                                              int maxToolCalls,
+                                              java.time.Duration overallTimeout) {
         Instant end = Instant.parse("2026-10-21T02:00:00Z");
         return new AgentOrchestrator.AgentInput(
                 UUID.randomUUID(),
@@ -101,7 +108,7 @@ final class AgentTestSupport {
                 end,
                 registry.definitions(),
                 new AgentOrchestrator.Limits(maxModelCalls, maxToolCalls,
-                        12000, 60000, 6000, java.time.Duration.ofSeconds(60)));
+                        12000, 60000, 6000, overallTimeout));
     }
 
     static String callTool(String tool, Map<String, Object> arguments) {

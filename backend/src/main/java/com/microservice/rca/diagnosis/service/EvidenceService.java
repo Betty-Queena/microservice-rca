@@ -36,6 +36,8 @@ public class EvidenceService {
     private static final int DEFAULT_LOG_LIMIT = 50;
     private static final int MAX_LOG_LIMIT = 200;
     private static final Duration MAX_WINDOW = Duration.ofHours(24);
+    /** 人工证据采集是同步接口，单次工具调用预算固定为 15 秒。 */
+    private static final Duration MANUAL_TOOL_TIMEOUT = Duration.ofSeconds(15);
 
     private final FaultEventService faultEventService;
     private final DiagnosisTaskRepository taskRepository;
@@ -93,12 +95,14 @@ public class EvidenceService {
             ToolInvocationOutcome logs = toolInvocationService.invoke(
                     task.getId(),
                     "query_logs",
-                    new ToolExecutionContext(task.getId(), serviceName, windowStart, windowEnd, parameters),
+                    new ToolExecutionContext(task.getId(), serviceName, windowStart, windowEnd,
+                            parameters, MANUAL_TOOL_TIMEOUT),
                     1);
             ToolInvocationOutcome metrics = toolInvocationService.invoke(
                     task.getId(),
                     "query_metrics",
-                    new ToolExecutionContext(task.getId(), serviceName, windowStart, windowEnd, parameters),
+                    new ToolExecutionContext(task.getId(), serviceName, windowStart, windowEnd,
+                            parameters, MANUAL_TOOL_TIMEOUT),
                     2);
 
             boolean anySuccess = logs.result().success() || metrics.result().success();

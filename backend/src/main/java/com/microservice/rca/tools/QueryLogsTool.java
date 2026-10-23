@@ -45,8 +45,12 @@ public class QueryLogsTool implements DiagnosticTool {
             int limit = intParam(context.parameters(), "limit", DEFAULT_LIMIT, 1, MAX_LIMIT);
             String requestId = stringParam(context.parameters(), "requestId");
 
-            List<ObservabilityClient.ServiceQueryResult> results = observabilityClient.queryLogs(
-                    target, context.windowStart(), context.windowEnd(), requestId, limit);
+            List<ObservabilityClient.ServiceQueryResult> results = context.timeout() == null
+                    ? observabilityClient.queryLogs(
+                            target, context.windowStart(), context.windowEnd(), requestId, limit)
+                    : observabilityClient.queryLogs(
+                            target, context.windowStart(), context.windowEnd(), requestId, limit,
+                            context.timeout());
 
             List<Map<String, Object>> items = new ArrayList<>();
             List<String> dataSources = new ArrayList<>();

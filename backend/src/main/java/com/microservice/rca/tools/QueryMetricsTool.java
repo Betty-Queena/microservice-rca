@@ -38,8 +38,11 @@ public class QueryMetricsTool implements DiagnosticTool {
         try {
             String target = context.serviceName() == null || context.serviceName().isBlank()
                     ? "all" : context.serviceName();
-            List<ObservabilityClient.ServiceQueryResult> results = observabilityClient.queryMetrics(
-                    target, context.windowStart(), context.windowEnd());
+            List<ObservabilityClient.ServiceQueryResult> results = context.timeout() == null
+                    ? observabilityClient.queryMetrics(
+                            target, context.windowStart(), context.windowEnd())
+                    : observabilityClient.queryMetrics(
+                            target, context.windowStart(), context.windowEnd(), context.timeout());
 
             List<Map<String, Object>> services = new ArrayList<>();
             List<String> dataSources = new ArrayList<>();

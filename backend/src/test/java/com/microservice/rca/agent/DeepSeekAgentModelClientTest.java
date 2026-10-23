@@ -10,6 +10,8 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -103,6 +105,50 @@ class DeepSeekAgentModelClientTest {
                     assertThat(ex.getFailureType()).isEqualTo("TIMEOUT");
                     assertThat(ex.isRetryable()).isTrue();
                 });
+    }
+
+    @Test
+    void usesRemainingBudgetAsReadTimeout() throws Exception {
+        start(exchange -> {
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+            }
+            respond(exchange, 200, "{}");
+        });
+
+        AgentModelClient.ModelRequest request = new AgentModelClient.ModelRequest(
+                "system", "user", 0.1, 500, Duration.ofMillis(200));
+
+        assertThatThrownBy(() -> client(1000, 3000).complete(request))
+                .isInstanceOf(AgentModelException.class)
+                .satisfies(error -> {
+                    AgentModelException ex = (AgentModelException) error;
+                    assertThat(ex.getFailureType()).isEqualTo("TIMEOUT");
+                    assertThat(ex.isRetryable()).isTrue();
+                });
+    }
+
+    @Test
+    void refusesToCallModelWhenBudgetIsAlreadyExhausted() throws Exception {
+        AtomicBoolean invoked = new AtomicBoolean(false);
+        start(exchange -> {
+            invoked.set(true);
+            respond(exchange, 200, "{}");
+        });
+
+        AgentModelClient.ModelRequest request = new AgentModelClient.ModelRequest(
+                "system", "user", 0.1, 500, Duration.ZERO);
+
+        assertThatThrownBy(() -> client(3000, 3000).complete(request))
+                .isInstanceOf(AgentModelException.class)
+                .satisfies(error -> {
+                    AgentModelException ex = (AgentModelException) error;
+                    assertThat(ex.getFailureType()).isEqualTo("TIMEOUT");
+                    assertThat(ex.getMessage()).contains("预算已耗尽");
+                });
+        assertThat(invoked).isFalse();
     }
 
     @Test

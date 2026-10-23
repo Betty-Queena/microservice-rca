@@ -5,9 +5,11 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.microservice.rca.observability.ObservabilityClient;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -85,6 +87,20 @@ class QueryLogsToolTest {
 
         assertThat(result.success()).isFalse();
         assertThat(result.errorMessage()).contains("query_logs 查询失败");
+    }
+
+    @Test
+    void passesRemainingBudgetToObservabilityClient() {
+        when(client.queryLogs(anyString(), any(), any(), any(), anyInt(), any())).thenReturn(List.of(
+                new ObservabilityClient.ServiceQueryResult("order-service",
+                        Map.of("source", "order-service RequestLogStore", "items", List.of()), null)));
+        Duration timeout = Duration.ofSeconds(3);
+
+        ToolResult result = tool.execute(new ToolExecutionContext(
+                UUID.randomUUID(), "all", START, END, Map.of(), timeout));
+
+        assertThat(result.success()).isTrue();
+        verify(client).queryLogs("all", START, END, null, 50, timeout);
     }
 
     @Test

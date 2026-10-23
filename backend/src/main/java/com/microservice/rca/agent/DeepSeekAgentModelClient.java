@@ -23,15 +23,17 @@ public class DeepSeekAgentModelClient implements AgentModelClient {
 
     private static final int MAX_ERROR_BODY_LENGTH = 300;
 
-    private final RestClient client;
+    private final RestClient.Builder builder;
+    private final RestClient defaultClient;
     private final AgentProperties.DeepSeek properties;
 
     public DeepSeekAgentModelClient(RestClient.Builder builder, AgentProperties properties) {
         this.properties = properties.deepseek();
+        this.builder = builder.clone();
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
         requestFactory.setConnectTimeout(properties.deepseek().connectTimeoutMs());
         requestFactory.setReadTimeout(properties.deepseek().readTimeoutMs());
-        this.client = builder
+        this.defaultClient = this.builder.clone()
                 .baseUrl(properties.deepseek().baseUrl())
                 .requestFactory(requestFactory)
                 .build();
@@ -52,6 +54,24 @@ public class DeepSeekAgentModelClient implements AgentModelClient {
         if (!isConfigured()) {
             throw new AgentModelException("CONFIG_MISSING",
                     "未配置 DEEPSEEK_API_KEY，无法调用真实模型", false);
+        }
+
+        int readTimeoutMs = properties.readTimeoutMs();
+        RestClient client = defaultClient;
+        if (request.timeout() != null) {
+            long remainingMs = request.timeout().toMillis();
+            if (remainingMs <= 0) {
+                throw new AgentModelException("TIMEOUT",
+                        "诊断整体预算已耗尽，未发起模型调用", false);
+            }
+            readTimeoutMs = (int) Math.max(1, Math.min(properties.readTimeoutMs(), remainingMs));
+            SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
+            requestFactory.setConnectTimeout(Math.min(properties.connectTimeoutMs(), readTimeoutMs));
+            requestFactory.setReadTimeout(readTimeoutMs);
+            client = builder.clone()
+                    .baseUrl(properties.baseUrl())
+                    .requestFactory(requestFactory)
+                    .build();
         }
 
         Map<String, Object> body = new LinkedHashMap<>();
@@ -78,7 +98,7 @@ public class DeepSeekAgentModelClient implements AgentModelClient {
         } catch (ResourceAccessException ex) {
             if (hasTimeoutCause(ex)) {
                 throw new AgentModelException("TIMEOUT",
-                        "DeepSeek 调用超时（" + properties.readTimeoutMs() + " ms）", true, ex);
+                        "DeepSeek 调用超时（" + readTimeoutMs + " ms）", true, ex);
             }
             throw new AgentModelException("UNREACHABLE",
                     "无法连接 DeepSeek API，请检查网络或代理配置", true, ex);
@@ -87,7 +107,7 @@ public class DeepSeekAgentModelClient implements AgentModelClient {
         } catch (Exception ex) {
             if (ex instanceof SocketTimeoutException || hasTimeoutCause(ex)) {
                 throw new AgentModelException("TIMEOUT",
-                        "DeepSeek 调用超时（" + properties.readTimeoutMs() + " ms）", true, ex);
+                        "DeepSeek 调用超时（" + readTimeoutMs + " ms）", true, ex);
             }
             throw new AgentModelException("INVALID_RESPONSE",
                     "DeepSeek 响应无法解析: " + ex.getClass().getSimpleName(), false, ex);

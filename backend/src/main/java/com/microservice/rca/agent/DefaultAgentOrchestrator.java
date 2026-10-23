@@ -76,9 +76,9 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         }
 
         while (modelCalls < input.limits().maxModelCalls()) {
-            if (Instant.now().isAfter(deadline)) {
-                return AgentRunResult.failed("诊断整体超时（"
-                        + input.limits().overallTimeout().toSeconds() + " 秒）", trace, modelName);
+            Duration remaining = remaining(deadline);
+            if (remaining.isZero()) {
+                return AgentRunResult.failed(timeoutReason(input), trace, modelName);
             }
 
             modelCalls++;
@@ -95,14 +95,21 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                         promptBuilder.systemPrompt(),
                         userPrompt,
                         properties.deepseek().temperature(),
-                        properties.deepseek().maxTokens()));
+                        properties.deepseek().maxTokens(),
+                        remaining));
             } catch (AgentModelException ex) {
                 trace.add(modelErrorTrace(modelCalls, ex, elapsedMs(modelStartedAt),
                         userPrompt.length(), modelName));
                 if (ex.isRetryable() && modelCalls < input.limits().maxModelCalls()) {
                     feedback = "上一轮模型调用失败（" + ex.getFailureType() + "），请基于现有证据继续决策";
+                    if (remaining(deadline).isZero()) {
+                        return AgentRunResult.failed(timeoutReason(input), trace, modelName);
+                    }
                     if (!sleepBeforeRetry()) {
                         return AgentRunResult.failed("模型重试被中断", trace, modelName);
+                    }
+                    if (remaining(deadline).isZero()) {
+                        return AgentRunResult.failed(timeoutReason(input), trace, modelName);
                     }
                     continue;
                 }
@@ -115,6 +122,13 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             }
 
             int latencyMs = elapsedMs(modelStartedAt);
+            if (remaining(deadline).isZero()) {
+                // 模型已返回但整体预算耗尽：保留本轮决策记录后按超时终止，不再执行工具。
+                trace.add(modelDecisionTrace(modelCalls, "DEADLINE_EXCEEDED", latencyMs,
+                        userPrompt.length(), response, modelName,
+                        "模型返回后诊断整体预算已耗尽", null));
+                return AgentRunResult.failed(timeoutReason(input), trace, modelName);
+            }
             AgentDecisionParser.Decision decision;
             try {
                 decision = decisionParser.parse(response.content(), input.limits().maxOutputChars());
@@ -161,12 +175,28 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 callDecisionTrace.put("tool", call.toolName());
                 trace.add(callDecisionTrace);
 
+                Duration toolBudget = remaining(deadline);
+                if (toolBudget.isZero()) {
+                    Map<String, Object> timeoutTrace = baseTrace("TOOL_EXECUTION", modelCalls);
+                    timeoutTrace.put("tool", call.toolName());
+                    timeoutTrace.put("service", call.service());
+                    timeoutTrace.put("requestId", call.requestId());
+                    timeoutTrace.put("status", "TIMEOUT");
+                    timeoutTrace.put("errorType", "TOOL_TIMEOUT");
+                    timeoutTrace.put("error", "诊断整体预算已耗尽，未执行工具调用");
+                    timeoutTrace.put("latencyMs", 0);
+                    timeoutTrace.put("evidenceCount", 0);
+                    timeoutTrace.put("evidenceIds", List.of());
+                    trace.add(timeoutTrace);
+                    return AgentRunResult.failed(timeoutReason(input), trace, modelName);
+                }
+
                 toolCalls++;
                 ToolInvocationOutcome outcome = toolInvocationService.invoke(
                         input.diagnosisTaskId(),
                         call.toolName(),
                         new ToolExecutionContext(input.diagnosisTaskId(), call.service(),
-                                call.windowStart(), call.windowEnd(), call.parameters()),
+                                call.windowStart(), call.windowEnd(), call.parameters(), toolBudget),
                         toolCalls);
 
                 List<String> evidenceIds = extractEvidenceIds(outcome.result().output());
@@ -363,6 +393,16 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         entry.put("round", round);
         entry.put("at", Instant.now().toString());
         return entry;
+    }
+
+    private Duration remaining(Instant deadline) {
+        Duration left = Duration.between(Instant.now(), deadline);
+        return left.isNegative() || left.isZero() ? Duration.ZERO : left;
+    }
+
+    private String timeoutReason(AgentInput input) {
+        return "诊断整体超时（" + input.limits().overallTimeout().toSeconds()
+                + " 秒），已停止模型与工具调用";
     }
 
     private boolean sleepBeforeRetry() {
