@@ -1,0 +1,31 @@
+server:
+  port: ${ORDER_SERVER_PORT:8081}
+
+spring:
+  application:
+    name: order-service
+  config:
+    import:
+      - optional:file:../../.env[.properties]
+      - optional:file:./.env[.properties]
+
+inventory:
+  base-url: ${INVENTORY_BASE_URL:http://localhost:8082}
+  connect-timeout-ms: ${INVENTORY_CONNECT_TIMEOUT_MS:2000}
+  read-timeout-ms: ${INVENTORY_READ_TIMEOUT_MS:5000}
+
+app:
+  version: 0.2.0
+
+# 真实请求观测：有界内存 + 滚动 JSONL 文件
+observability:
+  business-path-prefix: /api/orders
+  log:
+    max-entries: ${OBSERVABILITY_LOG_MAX_ENTRIES:5000}
+  metrics:
+    retention-minutes: ${OBSERVABILITY_METRICS_RETENTION_MINUTES:180}
+
+logging:
+  level:
+    root: INFO
+    com.microservice.rca: INFO

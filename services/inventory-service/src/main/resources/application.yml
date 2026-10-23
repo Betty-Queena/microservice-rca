@@ -1,0 +1,35 @@
+server:
+  port: ${INVENTORY_SERVER_PORT:8082}
+
+spring:
+  application:
+    name: inventory-service
+  config:
+    import:
+      - optional:file:../../.env[.properties]
+      - optional:file:./.env[.properties]
+
+app:
+  version: 0.2.0
+
+# 真实请求观测：有界内存 + 滚动 JSONL 文件
+observability:
+  business-path-prefix: /api/inventory
+  log:
+    max-entries: ${OBSERVABILITY_LOG_MAX_ENTRIES:5000}
+  metrics:
+    retention-minutes: ${OBSERVABILITY_METRICS_RETENTION_MINUTES:180}
+
+# 故障注入实验：默认关闭，仅本地访问，自动过期
+experiment:
+  fault-injection:
+    enabled: ${EXPERIMENT_FAULT_INJECTION_ENABLED:false}
+    allowed-remote-addresses: ${EXPERIMENT_FAULT_INJECTION_ALLOWED_REMOTE_ADDRESSES:127.0.0.1,0:0:0:0:0:0:0:1,::1}
+    max-delay-ms: ${EXPERIMENT_FAULT_INJECTION_MAX_DELAY_MS:30000}
+    default-duration-seconds: ${EXPERIMENT_FAULT_INJECTION_DEFAULT_DURATION_SECONDS:120}
+    max-duration-seconds: ${EXPERIMENT_FAULT_INJECTION_MAX_DURATION_SECONDS:600}
+
+logging:
+  level:
+    root: INFO
+    com.microservice.rca: INFO
