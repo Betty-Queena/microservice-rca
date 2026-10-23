@@ -5,6 +5,7 @@ import static com.microservice.rca.agent.AgentTestSupport.properties;
 import static com.microservice.rca.agent.AgentTestSupport.tool;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -155,8 +156,10 @@ class AgentTaskRunnerTest {
 
         DiagnosisTask saved = lastSaved();
         assertThat(saved.getStatus()).isEqualTo(DiagnosisStatus.SUCCEEDED);
-        // 诊断完成不等于故障解决，事件回到待人工处置。
-        assertThat(event.getStatus()).isEqualTo(FaultEventStatus.OPEN);
+        // 诊断完成不等于故障解决，事件通过条件更新回到待人工处置。
+        verify(eventRepository).updateStatusIfCurrent(
+                eq(event.getId()), eq(FaultEventStatus.DIAGNOSING),
+                eq(FaultEventStatus.OPEN), any(Instant.class));
         assertThat(saved.getReport()).contains("\"modelCallCount\":2");
         assertThat(saved.getReport()).contains("\"promptTokens\":42");
         assertThat(saved.getReport()).contains("\"completionTokens\":28");
@@ -211,8 +214,9 @@ class AgentTaskRunnerTest {
 
         runner.run(task.getId());
 
-        assertThat(event.getStatus()).isEqualTo(FaultEventStatus.OPEN);
-        verify(eventRepository).save(event);
+        verify(eventRepository).updateStatusIfCurrent(
+                eq(event.getId()), eq(FaultEventStatus.DIAGNOSING),
+                eq(FaultEventStatus.OPEN), any(Instant.class));
     }
 
     @Test

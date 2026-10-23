@@ -9,6 +9,7 @@ import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
+import org.springframework.transaction.annotation.Transactional;
 
 public interface FaultEventRepository extends JpaRepository<FaultEvent, UUID>,
         JpaSpecificationExecutor<FaultEvent> {
@@ -16,6 +17,7 @@ public interface FaultEventRepository extends JpaRepository<FaultEvent, UUID>,
     /**
      * 条件更新事件状态，避免“先读取再保存”覆盖人工刚写入的 RESOLVED/CLOSED。
      */
+    @Transactional
     @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query("""
             update FaultEvent e

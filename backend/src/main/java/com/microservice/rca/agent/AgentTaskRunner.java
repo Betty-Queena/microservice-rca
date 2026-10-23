@@ -162,16 +162,13 @@ public class AgentTaskRunner {
 
     /**
      * 诊断任务进入终态后把事件从 DIAGNOSING 恢复为 OPEN。
+     * 使用条件更新，避免读-改-写覆盖人工同时写入的 RESOLVED/CLOSED。
      * AI 诊断完成不等于故障已解决：事件仍等待人工处置，只有人工确认后才进入 RESOLVED/CLOSED。
-     * 不修改已解决/已关闭事件。
      */
     private void restoreEventAfterDiagnosis(DiagnosisTask task) {
-        eventRepository.findById(task.getFaultEventId()).ifPresent(event -> {
-            if (event.getStatus() == FaultEventStatus.DIAGNOSING) {
-                event.setStatus(FaultEventStatus.OPEN);
-                eventRepository.save(event);
-            }
-        });
+        eventRepository.updateStatusIfCurrent(
+                task.getFaultEventId(), FaultEventStatus.DIAGNOSING,
+                FaultEventStatus.OPEN, Instant.now());
     }
 
     private Map<String, Object> withRunStats(Map<String, Object> report, RunStats stats) {

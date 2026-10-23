@@ -17,6 +17,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
@@ -27,6 +30,8 @@ import org.springframework.web.server.ResponseStatusException;
  */
 @Service
 public class EvidenceService {
+
+    private static final Logger log = LoggerFactory.getLogger(EvidenceService.class);
 
     private static final int DEFAULT_LOG_LIMIT = 50;
     private static final int MAX_LOG_LIMIT = 200;
@@ -84,51 +89,78 @@ public class EvidenceService {
         parameters.put("limit", logLimit);
         parameters.put("serviceName", serviceName);
 
-        ToolInvocationOutcome logs = toolInvocationService.invoke(
-                task.getId(),
-                "query_logs",
-                new ToolExecutionContext(task.getId(), serviceName, windowStart, windowEnd, parameters),
-                1);
-        ToolInvocationOutcome metrics = toolInvocationService.invoke(
-                task.getId(),
-                "query_metrics",
-                new ToolExecutionContext(task.getId(), serviceName, windowStart, windowEnd, parameters),
-                2);
+        try {
+            ToolInvocationOutcome logs = toolInvocationService.invoke(
+                    task.getId(),
+                    "query_logs",
+                    new ToolExecutionContext(task.getId(), serviceName, windowStart, windowEnd, parameters),
+                    1);
+            ToolInvocationOutcome metrics = toolInvocationService.invoke(
+                    task.getId(),
+                    "query_metrics",
+                    new ToolExecutionContext(task.getId(), serviceName, windowStart, windowEnd, parameters),
+                    2);
 
-        boolean anySuccess = logs.result().success() || metrics.result().success();
-        task.setStatus(anySuccess ? DiagnosisStatus.SUCCEEDED : DiagnosisStatus.FAILED);
-        task.setCompletedAt(Instant.now());
-        task = taskRepository.save(task);
+            boolean anySuccess = logs.result().success() || metrics.result().success();
+            Instant collectedAt = Instant.now();
+            List<EvidenceCollectionView.ToolEvidenceView> toolViews = new ArrayList<>();
+            toolViews.add(toToolView(logs));
+            toolViews.add(toToolView(metrics));
 
-        Instant collectedAt = Instant.now();
-        List<EvidenceCollectionView.ToolEvidenceView> toolViews = new ArrayList<>();
-        toolViews.add(toToolView(logs));
-        toolViews.add(toToolView(metrics));
+            Map<String, Object> evidence = new LinkedHashMap<>();
+            evidence.put("eventId", eventId.toString());
+            evidence.put("diagnosisTaskId", task.getId().toString());
+            evidence.put("collectedAt", collectedAt.toString());
+            evidence.put("windowStart", windowStart.toString());
+            evidence.put("windowEnd", windowEnd.toString());
+            evidence.put("requestId", requestId);
+            evidence.put("serviceName", serviceName);
+            evidence.put("logLimit", logLimit);
+            evidence.put("tools", toolViews.stream().map(this::toEvidenceTool).toList());
+            evidence.put("note", "工具输出为真实观测数据快照；采集失败的工具已记录错误，未使用模拟数据");
 
-        Map<String, Object> evidence = new LinkedHashMap<>();
-        evidence.put("eventId", eventId.toString());
-        evidence.put("diagnosisTaskId", task.getId().toString());
-        evidence.put("collectedAt", collectedAt.toString());
-        evidence.put("windowStart", windowStart.toString());
-        evidence.put("windowEnd", windowEnd.toString());
-        evidence.put("requestId", requestId);
-        evidence.put("serviceName", serviceName);
-        evidence.put("logLimit", logLimit);
-        evidence.put("tools", toolViews.stream().map(this::toEvidenceTool).toList());
-        evidence.put("note", "工具输出为真实观测数据快照；采集失败的工具已记录错误，未使用模拟数据");
-        faultEventService.saveEvidence(eventId, jsonSupport.write(evidence), collectedAt);
+            // 先写证据，再落任务终态：避免出现 SUCCEEDED 但事件没有证据快照。
+            faultEventService.saveEvidence(eventId, jsonSupport.write(evidence), collectedAt);
+            task.setStatus(anySuccess ? DiagnosisStatus.SUCCEEDED : DiagnosisStatus.FAILED);
+            task.setFailureReason(anySuccess ? null : failureSummary(toolViews));
+            task.setCompletedAt(Instant.now());
+            task = taskRepository.save(task);
 
-        return new EvidenceCollectionView(
-                eventId,
-                task.getId(),
-                task.getStatus().name(),
-                anySuccess,
-                collectedAt,
-                windowStart,
-                windowEnd,
-                requestId,
-                toolViews,
-                "证据来自 order-service / inventory-service 的真实观测接口；工具调用已写入 tool_invocation 审计表");
+            return new EvidenceCollectionView(
+                    eventId,
+                    task.getId(),
+                    task.getStatus().name(),
+                    anySuccess,
+                    collectedAt,
+                    windowStart,
+                    windowEnd,
+                    requestId,
+                    toolViews,
+                    "证据来自 order-service / inventory-service 的真实观测接口；工具调用已写入 tool_invocation 审计表");
+        } catch (RuntimeException ex) {
+            String reason = "证据采集失败: " + ex.getClass().getSimpleName()
+                    + (ex.getMessage() != null ? " - " + ex.getMessage() : "");
+            log.warn("Evidence collection for event {} failed", eventId, ex);
+            try {
+                task.setStatus(DiagnosisStatus.FAILED);
+                task.setFailureReason(truncate(reason, 1024));
+                task.setCompletedAt(Instant.now());
+                taskRepository.save(task);
+            } catch (Exception persistEx) {
+                // 终态持久化失败时保留原始异常，任务由启动恢复兜底。
+                log.error("Failed to persist failed evidence task {}", task.getId(), persistEx);
+                ex.addSuppressed(persistEx);
+            }
+            throw ex;
+        }
+    }
+
+    private String failureSummary(List<EvidenceCollectionView.ToolEvidenceView> toolViews) {
+        String detail = toolViews.stream()
+                .map(tool -> tool.toolName() + "="
+                        + (tool.error() != null ? tool.error() : "工具返回失败"))
+                .collect(Collectors.joining("; "));
+        return truncate("所有诊断工具调用失败: " + detail, 1024);
     }
 
     private EvidenceCollectionView.ToolEvidenceView toToolView(ToolInvocationOutcome outcome) {
