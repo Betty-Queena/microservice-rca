@@ -358,6 +358,7 @@ cmd.exe /d /c "cd /d C:\Users\y\Documents\AI\program\microservice-rca\frontend &
 | B3 | `0b534cb` | 启动恢复孤儿诊断任务并保证证据采集异常后的终态 |
 | B4 | `c24af58` | 新增 V4 迁移，约束每个事件最多一个活跃 Agent 任务 |
 | B5 | `1841cc3` | 将诊断整体预算传递到模型与工具调用 |
+| B5 补充 | `fd1cb2d` | 修正 B5 测试中的 AtomicBoolean 断言写法 |
 | B6 | `fe7ee12` | 修复诊断任务终态覆盖与事件状态一致性 |
 
 未 push。
