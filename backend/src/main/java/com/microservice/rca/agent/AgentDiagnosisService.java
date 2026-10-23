@@ -126,16 +126,17 @@ public class AgentDiagnosisService {
 
     /**
      * 诊断任务启动时把待处理事件标记为诊断中。
-     * 已解决/已关闭事件保持原状态，只有事件仍处于 OPEN 时才推进。
+     * 使用内部条件更新，只推进仍为 OPEN 的事件；事件状态更新失败不阻止真实诊断执行。
      */
     private void markEventDiagnosing(FaultEvent event) {
         if (event.getStatus() != FaultEventStatus.OPEN) {
             return;
         }
         try {
-            faultEventService.updateStatus(event.getId(), FaultEventStatus.DIAGNOSING);
-        } catch (ResponseStatusException ignored) {
-            // 事件状态更新失败不应阻止真实诊断执行。
+            faultEventService.markDiagnosing(event.getId());
+        } catch (Exception ex) {
+            // 包括乐观锁冲突在内的状态更新失败，都不能阻止诊断任务执行。
+            log.warn("Failed to mark event {} as DIAGNOSING", event.getId(), ex);
         }
     }
 

@@ -63,6 +63,8 @@ class AgentTaskRunnerTest {
         event.setRequestId("exp-abc123");
 
         when(taskRepository.findById(task.getId())).thenReturn(Optional.of(task));
+        when(taskRepository.save(any(DiagnosisTask.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
         when(eventRepository.findById(task.getFaultEventId())).thenReturn(Optional.of(event));
         when(modelClient.modelName()).thenReturn("deepseek-flash");
 
@@ -246,6 +248,76 @@ class AgentTaskRunnerTest {
         assertThat(saved.getFailureReason()).contains("Agent 执行异常");
         assertThat(saved.getCompletedAt()).isNotNull();
         verify(orchestrator, never()).diagnose(any());
+    }
+
+    @Test
+    void doesNotOverwriteCancelledTaskWithDiagnosisResult() {
+        when(orchestrator.diagnose(any())).thenAnswer(invocation -> {
+            // 模拟执行期间人工将任务取消。
+            task.setStatus(DiagnosisStatus.CANCELLED);
+            return AgentOrchestrator.AgentRunResult.rootCause(
+                    Map.of("rootCause", "不应写入的结论"),
+                    List.of(Map.of("type", "MODEL_DECISION")),
+                    "deepseek-flash",
+                    "HIGH");
+        });
+
+        runner.run(task.getId());
+
+        assertThat(task.getStatus()).isEqualTo(DiagnosisStatus.CANCELLED);
+        assertThat(task.getRootCause()).isNull();
+        assertThat(task.getReport()).isNull();
+        verify(eventRepository, never()).updateStatusIfCurrent(
+                any(), any(), any(), any());
+    }
+
+    @Test
+    void doesNotOverwriteCancelledTaskWhenFailureOccurs() {
+        when(orchestrator.diagnose(any())).thenAnswer(invocation -> {
+            task.setStatus(DiagnosisStatus.CANCELLED);
+            throw new IllegalStateException("boom");
+        });
+
+        runner.run(task.getId());
+
+        assertThat(task.getStatus()).isEqualTo(DiagnosisStatus.CANCELLED);
+        assertThat(task.getFailureReason()).isNull();
+        verify(eventRepository, never()).updateStatusIfCurrent(
+                any(), any(), any(), any());
+    }
+
+    @Test
+    void eventRestoreFailureDoesNotOverwriteSuccessfulTask() {
+        when(orchestrator.diagnose(any())).thenReturn(AgentOrchestrator.AgentRunResult.rootCause(
+                Map.of("rootCause", "库存服务响应延迟导致订单结算超时"),
+                List.of(Map.of("type", "MODEL_DECISION")),
+                "deepseek-flash",
+                "HIGH"));
+        when(eventRepository.updateStatusIfCurrent(any(), any(), any(), any()))
+                .thenThrow(new DataIntegrityViolationException("event update failed"));
+
+        runner.run(task.getId());
+
+        assertThat(task.getStatus()).isEqualTo(DiagnosisStatus.SUCCEEDED);
+        assertThat(task.getRootCause()).contains("库存服务");
+        assertThat(task.getFailureReason()).isNull();
+        assertThat(task.getCompletedAt()).isNotNull();
+    }
+
+    @Test
+    void doesNotOverwriteSucceededTaskWhenFailurePathRunsAfterConcurrentCompletion() {
+        when(orchestrator.diagnose(any())).thenAnswer(invocation -> {
+            // 模拟另一执行流已完成任务后本线程才进入异常处理。
+            task.setStatus(DiagnosisStatus.SUCCEEDED);
+            throw new IllegalStateException("late failure");
+        });
+
+        runner.run(task.getId());
+
+        assertThat(task.getStatus()).isEqualTo(DiagnosisStatus.SUCCEEDED);
+        assertThat(task.getFailureReason()).isNull();
+        verify(eventRepository, never()).updateStatusIfCurrent(
+                any(), any(), any(), any());
     }
 
     private DiagnosisTask lastSaved() {

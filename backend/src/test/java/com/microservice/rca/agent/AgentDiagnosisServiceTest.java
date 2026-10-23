@@ -29,6 +29,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.core.task.TaskRejectedException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.web.server.ResponseStatusException;
 
 class AgentDiagnosisServiceTest {
@@ -92,7 +93,7 @@ class AgentDiagnosisServiceTest {
         // 原任务的历史状态和失败原因不被覆盖。
         assertThat(original.getStatus()).isEqualTo(DiagnosisStatus.FAILED);
         assertThat(original.getFailureReason()).isEqualTo("瞬时失败");
-        verify(faultEventService).updateStatus(event.getId(), FaultEventStatus.DIAGNOSING);
+        verify(faultEventService).markDiagnosing(event.getId());
         verify(taskRunner).run(retry.getId());
     }
 
@@ -171,8 +172,21 @@ class AgentDiagnosisServiceTest {
 
         service.retry(original.getId());
 
-        verify(faultEventService, never()).updateStatus(any(UUID.class), any(FaultEventStatus.class));
+        verify(faultEventService, never()).markDiagnosing(any(UUID.class));
         assertThat(created.get()).isNotNull();
+        verify(taskRunner).run(created.get().getId());
+    }
+
+    @Test
+    void startsTaskEvenWhenEventStatusUpdateConflicts() {
+        when(faultEventService.markDiagnosing(event.getId()))
+                .thenThrow(new ObjectOptimisticLockingFailureException(
+                        FaultEvent.class, event.getId()));
+
+        AgentTaskDetailView detail = service.startForEvent(event.getId());
+
+        assertThat(detail.id()).isEqualTo(created.get().getId());
+        // 事件状态冲突不能留下未提交的 PENDING 任务。
         verify(taskRunner).run(created.get().getId());
     }
 }

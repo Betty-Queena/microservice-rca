@@ -147,6 +147,11 @@ public class FaultEventService {
     public FaultEventView updateStatus(UUID eventId, FaultEventStatus target) {
         FaultEvent event = requireEvent(eventId);
         FaultEventStatus current = event.getStatus();
+        if (target == FaultEventStatus.DIAGNOSING) {
+            // DIAGNOSING 只能由诊断流程推进，避免人工把事件置为“诊断中”后无任务可恢复。
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "不能通过公共接口把事件标记为诊断中，请使用诊断接口");
+        }
         if (current == target) {
             return toView(event);
         }
@@ -155,10 +160,22 @@ public class FaultEventService {
                     "不允许的状态流转: " + current + " -> " + target);
         }
         event.setStatus(target);
-        if (target == FaultEventStatus.RESOLVED || target == FaultEventStatus.CLOSED) {
+        if (target == FaultEventStatus.RESOLVED && event.getResolvedAt() == null) {
             event.setResolvedAt(Instant.now());
         }
         return toView(eventRepository.save(event));
+    }
+
+    /**
+     * 诊断流程内部使用：仅当事件仍为 OPEN 时条件推进为 DIAGNOSING。
+     * 已解决/已关闭事件不会被覆盖。
+     *
+     * @return 是否实际发生更新
+     */
+    @Transactional
+    public boolean markDiagnosing(UUID eventId) {
+        return eventRepository.updateStatusIfCurrent(
+                eventId, FaultEventStatus.OPEN, FaultEventStatus.DIAGNOSING, Instant.now()) > 0;
     }
 
     /**
@@ -251,8 +268,7 @@ public class FaultEventService {
 
     private boolean isAllowedTransition(FaultEventStatus current, FaultEventStatus target) {
         return switch (current) {
-            case OPEN -> target == FaultEventStatus.DIAGNOSING
-                    || target == FaultEventStatus.RESOLVED
+            case OPEN -> target == FaultEventStatus.RESOLVED
                     || target == FaultEventStatus.CLOSED;
             case DIAGNOSING -> target == FaultEventStatus.RESOLVED
                     || target == FaultEventStatus.CLOSED;

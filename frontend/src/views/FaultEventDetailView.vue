@@ -479,14 +479,6 @@ onBeforeUnmount(stopAgentPolling)
                 启动AI诊断
               </el-button>
               <el-button
-                v-if="event.status === 'OPEN'"
-                plain
-                :loading="updating"
-                @click="handleStatus('DIAGNOSING')"
-              >
-                标记诊断中
-              </el-button>
-              <el-button
                 v-if="['OPEN', 'DIAGNOSING'].includes(event.status)"
                 type="success"
                 plain

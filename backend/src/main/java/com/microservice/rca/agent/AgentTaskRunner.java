@@ -58,42 +58,56 @@ public class AgentTaskRunner {
                 log.warn("Agent task {} not found, skip", taskId);
                 return;
             }
+            if (isTerminal(task.getStatus())) {
+                log.warn("Agent task {} already in terminal status {}, skip", taskId, task.getStatus());
+                return;
+            }
 
             // 首次 RUNNING 保存也纳入异常保护：保存失败时任务不能永久停留在 PENDING。
             task.setStatus(DiagnosisStatus.RUNNING);
             task.setStartedAt(Instant.now());
             task.setFailureReason(null);
-            taskRepository.save(task);
+            task = taskRepository.save(task);
 
             FaultEvent event = eventRepository.findById(task.getFaultEventId()).orElse(null);
             if (event == null) {
-                fail(task, "故障事件不存在，无法执行 Agent 诊断", null, null);
+                fail(task.getId(), "故障事件不存在，无法执行 Agent 诊断", null, null);
                 return;
             }
 
             AgentOrchestrator.AgentInput input = inputFactory.create(task, event, Instant.now());
             task.setAgentInput(jsonSupport.write(input));
             task.setModelName(orchestratorModelName());
-            taskRepository.save(task);
+            task = taskRepository.save(task);
 
             AgentOrchestrator.AgentRunResult result = orchestrator.diagnose(input);
-            applyResult(task, result);
+            applyResult(task.getId(), result);
         } catch (Exception ex) {
             String reason = "Agent 执行异常: " + ex.getClass().getSimpleName()
                     + (ex.getMessage() != null ? " - " + ex.getMessage() : "");
             log.warn("Agent task {} failed: {}", taskId, ex.toString());
-            if (task != null) {
-                try {
-                    fail(task, reason, currentTrace(task), orchestratorModelName());
-                } catch (Exception persistEx) {
-                    // 失败状态也无法持久化时，只能留给启动恢复兜底。
-                    log.error("Failed to persist failure state for agent task {}", taskId, persistEx);
-                }
+            try {
+                fail(taskId, reason, task != null ? currentTrace(task) : null, orchestratorModelName());
+            } catch (Exception persistEx) {
+                // 失败状态也无法持久化时，只能留给启动恢复兜底。
+                log.error("Failed to persist failure state for agent task {}", taskId, persistEx);
             }
         }
     }
 
-    private void applyResult(DiagnosisTask task, AgentOrchestrator.AgentRunResult result) {
+    private void applyResult(UUID taskId, AgentOrchestrator.AgentRunResult result) {
+        DiagnosisTask task = taskRepository.findById(taskId).orElse(null);
+        if (task == null) {
+            log.warn("Agent task {} disappeared before result persistence, skip", taskId);
+            return;
+        }
+        if (isTerminal(task.getStatus())) {
+            // 任务可能已被取消或由其他流程落为终态，不得覆盖已有终态。
+            log.warn("Agent task {} already in terminal status {}, skip result overwrite",
+                    taskId, task.getStatus());
+            return;
+        }
+
         List<Map<String, Object>> trace = new ArrayList<>(result.decisionTrace());
         RunStats stats = RunStats.from(trace);
         trace.add(stats.toTraceEntry());
@@ -131,14 +145,27 @@ public class AgentTaskRunner {
                 task.setFailureReason(truncate(result.failureReason(), 1024));
             }
         }
+        // 先持久化任务终态，再条件恢复事件状态：事件恢复失败不能把成功的任务改写成失败。
+        task = taskRepository.save(task);
         restoreEventAfterDiagnosis(task);
-        taskRepository.save(task);
     }
 
-    private void fail(DiagnosisTask task,
+    private void fail(UUID taskId,
                       String reason,
                       List<Map<String, Object>> trace,
                       String modelName) {
+        DiagnosisTask task = taskRepository.findById(taskId).orElse(null);
+        if (task == null) {
+            log.warn("Agent task {} disappeared before failure persistence, skip", taskId);
+            return;
+        }
+        if (isTerminal(task.getStatus())) {
+            // 取消/完成等终态优先，失败信息不得覆盖已有终态。
+            log.warn("Agent task {} already in terminal status {}, skip failure overwrite",
+                    taskId, task.getStatus());
+            return;
+        }
+
         task.setStatus(DiagnosisStatus.FAILED);
         task.setResultStatus(null);
         task.setConfidenceLevel(null);
@@ -156,19 +183,31 @@ public class AgentTaskRunner {
         entries.add(error);
         entries.add(RunStats.from(entries).toTraceEntry());
         task.setDecisionTrace(jsonSupport.write(entries));
+        task = taskRepository.save(task);
         restoreEventAfterDiagnosis(task);
-        taskRepository.save(task);
+    }
+
+    private boolean isTerminal(DiagnosisStatus status) {
+        return status == DiagnosisStatus.SUCCEEDED
+                || status == DiagnosisStatus.FAILED
+                || status == DiagnosisStatus.CANCELLED;
     }
 
     /**
      * 诊断任务进入终态后把事件从 DIAGNOSING 恢复为 OPEN。
      * 使用条件更新，避免读-改-写覆盖人工同时写入的 RESOLVED/CLOSED。
      * AI 诊断完成不等于故障已解决：事件仍等待人工处置，只有人工确认后才进入 RESOLVED/CLOSED。
+     * 事件恢复失败只记录日志，不影响已持久化的任务终态。
      */
     private void restoreEventAfterDiagnosis(DiagnosisTask task) {
-        eventRepository.updateStatusIfCurrent(
-                task.getFaultEventId(), FaultEventStatus.DIAGNOSING,
-                FaultEventStatus.OPEN, Instant.now());
+        try {
+            eventRepository.updateStatusIfCurrent(
+                    task.getFaultEventId(), FaultEventStatus.DIAGNOSING,
+                    FaultEventStatus.OPEN, Instant.now());
+        } catch (Exception ex) {
+            log.warn("Failed to restore event {} after diagnosis task {} reached {}",
+                    task.getFaultEventId(), task.getId(), task.getStatus(), ex);
+        }
     }
 
     private Map<String, Object> withRunStats(Map<String, Object> report, RunStats stats) {
