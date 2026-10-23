@@ -51,6 +51,20 @@ class FaultInjectionServiceTest {
     }
 
     @Test
+    void defaultDelayUpperBoundIsBelowOrderServiceReadTimeout() {
+        FaultInjectionProperties properties = new FaultInjectionProperties();
+        properties.setEnabled(true);
+        FaultInjectionService service = new FaultInjectionService(properties);
+
+        assertThat(properties.getMaxDelayMs()).isEqualTo(4500);
+        assertThat(service.enable(new EnableFaultRequest(FaultType.DELAY, 4500, 60, null)).delayMs())
+                .isEqualTo(4500);
+        assertThatThrownBy(() -> service.enable(new EnableFaultRequest(FaultType.DELAY, 4501, 60, null)))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("delayMs 必须在 1 到 4500 之间");
+    }
+
+    @Test
     void delayMustBeWithinConfiguredBounds() {
         FaultInjectionService service = new FaultInjectionService(properties(true));
 

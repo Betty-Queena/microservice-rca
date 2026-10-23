@@ -40,6 +40,16 @@ class InventoryClientTest {
     }
 
     @Test
+    void succeedsWhenResponseArrivesBeforeReadTimeout() throws Exception {
+        server = start(200, successBody(), 200);
+        InventoryClient client = client(1000);
+
+        InventoryReservation reservation = client.reserve("SKU-1001", 1, "ORD-1");
+
+        assertThat(reservation.remaining()).isEqualTo(99);
+    }
+
+    @Test
     void mapsReadTimeoutToTimeoutErrorType() throws Exception {
         server = start(200, successBody(), 500);
         InventoryClient client = client(100);

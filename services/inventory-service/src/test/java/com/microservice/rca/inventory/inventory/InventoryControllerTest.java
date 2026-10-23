@@ -46,6 +46,37 @@ class InventoryControllerTest {
     }
 
     @Test
+    void duplicateReservationWithSameOrderIdDoesNotDecrementTwice() throws Exception {
+        String body = "{\"quantity\":2,\"orderId\":\"ORD-IDEMPOTENT\"}";
+
+        mockMvc.perform(post("/api/inventory/SKU-1001/reserve")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.remaining").value(48));
+        mockMvc.perform(post("/api/inventory/SKU-1001/reserve")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.remaining").value(48));
+
+        mockMvc.perform(get("/api/inventory/SKU-1001"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.available").value(48));
+    }
+
+    @Test
+    void rejectsOrderIdLongerThanSixtyFourCharacters() throws Exception {
+        String orderId = "O".repeat(65);
+
+        mockMvc.perform(post("/api/inventory/SKU-1001/reserve")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"quantity\":1,\"orderId\":\"" + orderId + "\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value(400));
+    }
+
+    @Test
     void rejectsInsufficientStock() throws Exception {
         mockMvc.perform(post("/api/inventory/SKU-1003/reserve")
                         .contentType(MediaType.APPLICATION_JSON)

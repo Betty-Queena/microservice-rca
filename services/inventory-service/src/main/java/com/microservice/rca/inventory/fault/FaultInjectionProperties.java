@@ -13,7 +13,7 @@ public class FaultInjectionProperties {
     private boolean enabled = false;
     private List<String> allowedRemoteAddresses = new ArrayList<>(
             List.of("127.0.0.1", "0:0:0:0:0:0:0:1", "::1"));
-    private int maxDelayMs = 30000;
+    private int maxDelayMs = 4500;
     private int defaultDurationSeconds = 120;
     private int maxDurationSeconds = 600;
 

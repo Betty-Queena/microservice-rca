@@ -309,11 +309,11 @@ onBeforeUnmount(() => {
               <el-input-number
                 v-model="form.delayMs"
                 :min="1"
-                :max="status?.maxDelayMs || 30000"
+                :max="status?.maxDelayMs || 4500"
                 :step="500"
               />
               <div class="form-hint">
-                订单服务调用库存服务的读超时为 5 秒：超过 3 秒会记录为慢响应，超过 5 秒触发真实超时。
+                延迟上限 4500 毫秒，低于订单服务 5 秒读超时；超过 3 秒会记录为慢响应。
               </div>
             </el-form-item>
             <el-form-item label="持续时间（秒）">

@@ -37,7 +37,7 @@ public class InventoryController {
     @PostMapping("/{sku}/reserve")
     public ApiResponse<ReservationResponse> reserve(@PathVariable String sku,
                                                     @Valid @RequestBody ReserveRequest request) {
-        InventoryStore.Reservation reservation = inventoryStore.reserve(sku, request.quantity());
+        InventoryStore.Reservation reservation = inventoryStore.reserve(sku, request.quantity(), request.orderId());
         return ApiResponse.ok(new ReservationResponse(
                 reservation.sku(),
                 reservation.reservedQuantity(),
