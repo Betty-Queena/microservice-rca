@@ -3,9 +3,11 @@ package com.microservice.rca.db;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.microservice.rca.agent.DiagnosisTaskRecovery;
 import com.microservice.rca.diagnosis.domain.FaultEvent;
 import com.microservice.rca.diagnosis.domain.FaultEventStatus;
 import com.microservice.rca.diagnosis.repository.FaultEventRepository;
+import com.microservice.rca.testsupport.TestDatabaseGuard;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -17,6 +19,8 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.ContextConfiguration;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 /**
  * V4 迁移在干净数据库上的验证。
@@ -24,9 +28,22 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * <p>默认不执行，只有显式设置 RCA_V4_INTEGRATION=true 且连接到 rca_v4_* 临时库时运行。
  * 测试会写入少量临时数据并在用例结束后清理，不会连接 rca 业务库。</p>
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
+@SpringBootTest(
+        webEnvironment = SpringBootTest.WebEnvironment.NONE,
+        properties = {
+                "rca.remediation.recovery.enabled=false",
+                "rca.test.expected-database-prefix=rca_v4_"
+        })
+@ContextConfiguration(initializers = TestDatabaseGuard.class)
 @EnabledIfEnvironmentVariable(named = "RCA_V4_INTEGRATION", matches = "true")
 class V4MigrationIntegrationTest {
+
+    /**
+     * 屏蔽启动恢复监听器：避免上下文启动时扫描并修改数据库中的诊断任务。
+     * 该监听器在测试的 @BeforeEach 库名校验之前执行。
+     */
+    @MockitoBean
+    private DiagnosisTaskRecovery diagnosisTaskRecovery;
 
     @Autowired
     private JdbcTemplate jdbc;

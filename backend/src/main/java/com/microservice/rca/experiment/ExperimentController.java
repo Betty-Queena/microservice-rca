@@ -2,6 +2,7 @@ package com.microservice.rca.experiment;
 
 import com.microservice.rca.common.ApiResponse;
 import com.microservice.rca.experiment.api.CheckoutRequest;
+import com.microservice.rca.experiment.api.DisableFaultRequest;
 import com.microservice.rca.experiment.api.EnableFaultRequest;
 import com.microservice.rca.experiment.api.ExperimentExecutionView;
 import com.microservice.rca.experiment.api.ExperimentFaultStatusView;
@@ -37,9 +38,17 @@ public class ExperimentController {
         return ApiResponse.ok(experimentService.enable(request));
     }
 
+    /**
+     * 关闭故障注入。请求体可选：提供 expectedExperimentId 时条件关闭对应实验，
+     * 不提供时沿用原有无条件关闭行为，兼容现有前端和 Day 7 评测。
+     */
     @PostMapping("/faults/disable")
-    public ApiResponse<ExperimentFaultStatusView> disable() {
-        return ApiResponse.ok(experimentService.disable());
+    public ApiResponse<ExperimentFaultStatusView> disable(
+            @RequestBody(required = false) DisableFaultRequest request) {
+        if (request == null || request.expectedExperimentId() == null) {
+            return ApiResponse.ok(experimentService.disable());
+        }
+        return ApiResponse.ok(experimentService.disable(request.expectedExperimentId()));
     }
 
     @PostMapping("/faults/reset")

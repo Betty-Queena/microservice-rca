@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.microservice.rca.common.JsonSupport;
 import com.microservice.rca.diagnosis.domain.DiagnosisTask;
 import com.microservice.rca.diagnosis.domain.FaultEvent;
+import com.microservice.rca.external.domain.ExternalService;
+import com.microservice.rca.external.service.ExternalServiceRegistry;
 import com.microservice.rca.tools.DiagnosticToolRegistry;
 import java.time.Duration;
 import java.time.Instant;
@@ -31,22 +33,43 @@ public class AgentInputFactory {
 
     private final JsonSupport jsonSupport;
     private final DiagnosticToolRegistry registry;
+    private final ExternalServiceRegistry externalServiceRegistry;
     private final AgentProperties properties;
 
     public AgentInputFactory(JsonSupport jsonSupport,
                              DiagnosticToolRegistry registry,
+                             ExternalServiceRegistry externalServiceRegistry,
                              AgentProperties properties) {
         this.jsonSupport = jsonSupport;
         this.registry = registry;
+        this.externalServiceRegistry = externalServiceRegistry;
         this.properties = properties;
     }
 
     public AgentOrchestrator.AgentInput create(DiagnosisTask task, FaultEvent event, Instant now) {
         AgentProperties.Limits limits = properties.limits();
+        boolean external = "EXTERNAL".equalsIgnoreCase(event.getSource());
+        String serviceKind = external ? "EXTERNAL" : "BUILT_IN";
+        List<String> allowedServices = external
+                ? List.of(event.getServiceName())
+                : List.of("all", "order-service", "inventory-service");
+        boolean externalLogsConfigured = external && externalLogsConfigured(event);
+        List<DiagnosticToolRegistry.ToolDefinition> tools = registry.definitions().stream()
+                .filter(tool -> external || !"query_health".equals(tool.name()))
+                // 外部服务没有显式日志源时，不向模型暴露 query_logs，避免一次必然失败的工具调用。
+                .filter(tool -> !external || !"query_logs".equals(tool.name())
+                        || externalLogsConfigured)
+                .toList();
+        Map<String, String> unavailableTools = new LinkedHashMap<>();
+        if (external && !externalLogsConfigured) {
+            unavailableTools.put("query_logs", externalLogsUnavailableReason(event));
+        }
         return new AgentOrchestrator.AgentInput(
                 event.getId(),
                 task.getId(),
                 event.getServiceName(),
+                serviceKind,
+                allowedServices,
                 event.getEventType(),
                 event.getSeverity() != null ? event.getSeverity().name() : null,
                 event.getSummary(),
@@ -54,7 +77,8 @@ public class AgentInputFactory {
                 event.getRequestId(),
                 event.getOccurredAt() != null ? event.getOccurredAt().minusSeconds(60) : now.minusSeconds(900),
                 now,
-                registry.definitions(),
+                tools,
+                unavailableTools,
                 new AgentOrchestrator.Limits(
                         limits.maxModelCalls(),
                         limits.maxToolCalls(),
@@ -62,6 +86,22 @@ public class AgentInputFactory {
                         limits.maxPromptChars(),
                         limits.maxToolResultChars(),
                         Duration.ofSeconds(limits.timeoutSeconds())));
+    }
+
+    private boolean externalLogsConfigured(FaultEvent event) {
+        return externalServiceRegistry.findByName(event.getServiceName())
+                .map(ExternalService::getLogSourceUrl)
+                .filter(url -> url != null && !url.isBlank())
+                .isPresent();
+    }
+
+    private String externalLogsUnavailableReason(FaultEvent event) {
+        boolean registered = externalServiceRegistry.findByName(event.getServiceName()).isPresent();
+        if (!registered) {
+            return "外部服务未注册或未启用，无法确认日志数据源；query_logs 不可用";
+        }
+        return "外部服务 " + event.getServiceName()
+                + " 未配置日志数据源；Actuator 不提供日志查询，query_logs 不可用";
     }
 
     /**

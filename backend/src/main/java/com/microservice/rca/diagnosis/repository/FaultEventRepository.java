@@ -30,5 +30,24 @@ public interface FaultEventRepository extends JpaRepository<FaultEvent, UUID>,
                               @Param("target") FaultEventStatus target,
                               @Param("now") Instant now);
 
+    /**
+     * 处置验证通过后，仅当事件仍为 OPEN 时条件更新为 RESOLVED。
+     * 同时写入 resolvedAt，不覆盖人工并发写入的 RESOLVED/CLOSED。
+     */
+    @Transactional
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("""
+            update FaultEvent e
+               set e.status = :resolved,
+                   e.resolvedAt = :now,
+                   e.updatedAt = :now,
+                   e.version = e.version + 1
+             where e.id = :eventId and e.status = :open
+            """)
+    int resolveIfOpen(@Param("eventId") UUID eventId,
+                      @Param("open") FaultEventStatus open,
+                      @Param("resolved") FaultEventStatus resolved,
+                      @Param("now") Instant now);
+
     List<FaultEvent> findByStatus(FaultEventStatus status);
 }

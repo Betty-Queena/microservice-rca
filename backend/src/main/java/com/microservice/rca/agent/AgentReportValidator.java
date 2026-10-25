@@ -6,7 +6,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-
+import java.util.stream.Collectors;
 import org.springframework.stereotype.Component;
 
 /**
@@ -19,9 +19,19 @@ public class AgentReportValidator {
             "rootCause", "affectedServices", "hypothesis", "supportingEvidenceIds",
             "contradictingEvidenceIds", "confidenceLevel", "recommendedActions", "limitations");
     private static final Set<String> CONFIDENCE_LEVELS = Set.of("HIGH", "MEDIUM", "LOW");
-    private static final Set<String> KNOWN_SERVICES = Set.of("order-service", "inventory-service");
+    private static final Set<String> BUILT_IN_SERVICES =
+            Set.of("order-service", "inventory-service");
 
+    /**
+     * 兼容既有调用：内置实验服务报告的受影响服务范围固定为两个业务服务。
+     */
     public ValidatedReport validate(Map<String, Object> raw, Set<String> knownEvidenceIds) {
+        return validate(raw, knownEvidenceIds, List.copyOf(BUILT_IN_SERVICES));
+    }
+
+    public ValidatedReport validate(Map<String, Object> raw,
+                                    Set<String> knownEvidenceIds,
+                                    List<String> allowedServices) {
         if (raw == null) {
             throw new AgentValidationException("最终报告为空");
         }
@@ -38,10 +48,20 @@ public class AgentReportValidator {
             throw new AgentValidationException("confidenceLevel 只能是 HIGH/MEDIUM/LOW");
         }
 
+        Set<String> knownServices = allowedServices == null
+                ? BUILT_IN_SERVICES
+                : allowedServices.stream()
+                        .filter(service -> service != null && !service.isBlank())
+                        .filter(service -> !"all".equalsIgnoreCase(service))
+                        .collect(Collectors.toUnmodifiableSet());
+        if (knownServices.isEmpty()) {
+            knownServices = BUILT_IN_SERVICES;
+        }
         List<String> affectedServices = stringList(raw, "affectedServices", 1, 2);
         for (String service : affectedServices) {
-            if (!KNOWN_SERVICES.contains(service)) {
-                throw new AgentValidationException("affectedServices 包含未知服务: " + service);
+            if (!knownServices.contains(service)) {
+                throw new AgentValidationException("affectedServices 包含未知服务: " + service
+                        + "，当前诊断允许的服务: " + String.join("/", knownServices));
             }
         }
         if (affectedServices.stream().distinct().count() != affectedServices.size()) {

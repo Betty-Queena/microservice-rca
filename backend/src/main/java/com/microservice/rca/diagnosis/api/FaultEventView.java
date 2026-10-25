@@ -22,6 +22,7 @@ public record FaultEventView(
         Instant updatedAt,
         Instant resolvedAt,
         UUID experimentId,
+        UUID externalServiceId,
         String experimentFaultType,
         JsonNode experimentParameters,
         JsonNode observedResult,

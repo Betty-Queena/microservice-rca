@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { Aim, Expand, Fold, Monitor, Refresh, Search, Tools, Warning } from '@element-plus/icons-vue'
+import { Aim, Connection, Expand, Fold, Monitor, Refresh, Search, Tools, Warning } from '@element-plus/icons-vue'
 import { useHealth } from '../composables/useHealth'
 
 const route = useRoute()
@@ -72,6 +72,10 @@ onBeforeUnmount(() => {
         <el-menu-item index="/fault-events">
           <el-icon><Warning /></el-icon>
           <template #title>故障事件</template>
+        </el-menu-item>
+        <el-menu-item index="/external-services">
+          <el-icon><Connection /></el-icon>
+          <template #title>外部服务</template>
         </el-menu-item>
         <el-menu-item index="/diagnosis-tasks">
           <el-icon><Search /></el-icon>

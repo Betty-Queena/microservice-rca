@@ -52,12 +52,29 @@ class DeepSeekAgentModelClientTest {
         assertThat(response.completionTokens()).isEqualTo(8);
         assertThat(response.usageAvailable()).isTrue();
         assertThat(response.totalTokens()).isEqualTo(20);
+        assertThat(response.finishReason()).isNull();
+        assertThat(response.lengthTruncated()).isFalse();
         assertThat(authorization.get()).isEqualTo("Bearer test-key");
         assertThat(requestBody.get().path("model").asText()).isEqualTo("deepseek-flash");
         assertThat(requestBody.get().path("max_tokens").asInt()).isEqualTo(500);
         assertThat(requestBody.get().path("stream").asBoolean()).isFalse();
         assertThat(requestBody.get().path("response_format").path("type").asText())
                 .isEqualTo("json_object");
+    }
+
+    @Test
+    void parsesFinishReasonLengthWithoutLeakingPromptOrKey() throws Exception {
+        start(exchange -> respond(exchange, 200, """
+                {"model":"deepseek-flash","choices":[{"finish_reason":"length",
+                "message":{"content":"{\\"action\\":\\"FINAL_REPORT\\",\\"report\\":{"}}],
+                "usage":{"prompt_tokens":120,"completion_tokens":1200}}
+                """));
+
+        AgentModelClient.ModelResponse response = client(3000, 3000).complete(request());
+
+        assertThat(response.finishReason()).isEqualTo("length");
+        assertThat(response.lengthTruncated()).isTrue();
+        assertThat(response.content()).doesNotContain("test-key");
     }
 
     @Test
@@ -184,6 +201,7 @@ class DeepSeekAgentModelClientTest {
         DeepSeekAgentModelClient client = new DeepSeekAgentModelClient(
                 RestClient.builder(),
                 new AgentProperties(
+                        true,
                         new AgentProperties.DeepSeek("", "http://127.0.0.1:1", "deepseek-flash",
                                 0.1, 500, 1000, 3000),
                         new AgentProperties.Limits(3, 2, 12000, 60000, 6000, 60)));
@@ -195,6 +213,36 @@ class DeepSeekAgentModelClientTest {
                         .isEqualTo("CONFIG_MISSING"));
     }
 
+    @Test
+    void disabledSwitchBlocksHttpEvenWhenApiKeyIsPresent() throws Exception {
+        AtomicBoolean invoked = new AtomicBoolean(false);
+        start(exchange -> {
+            invoked.set(true);
+            respond(exchange, 200, "{}");
+        });
+
+        DeepSeekAgentModelClient client = new DeepSeekAgentModelClient(
+                RestClient.builder(),
+                new AgentProperties(
+                        false,
+                        new AgentProperties.DeepSeek("test-key",
+                                "http://127.0.0.1:" + server.getAddress().getPort(),
+                                "deepseek-flash", 0.1, 500, 3000, 3000),
+                        new AgentProperties.Limits(3, 2, 12000, 60000, 6000, 60)));
+
+        assertThat(client.isConfigured()).isFalse();
+        assertThat(client.unavailabilityReason()).contains("RCA_LLM_ENABLED=false");
+        assertThatThrownBy(() -> client.complete(request()))
+                .isInstanceOf(AgentModelException.class)
+                .satisfies(error -> {
+                    AgentModelException ex = (AgentModelException) error;
+                    assertThat(ex.getFailureType()).isEqualTo("LLM_DISABLED");
+                    assertThat(ex.getMessage()).contains("RCA_LLM_ENABLED=false");
+                    assertThat(ex.isRetryable()).isFalse();
+                });
+        assertThat(invoked.get()).isFalse();
+    }
+
     private AgentModelClient.ModelRequest request() {
         return new AgentModelClient.ModelRequest("system", "user", 0.1, 500);
     }
@@ -204,6 +252,7 @@ class DeepSeekAgentModelClientTest {
         return new DeepSeekAgentModelClient(
                 RestClient.builder(),
                 new AgentProperties(
+                        true,
                         new AgentProperties.DeepSeek("test-key", "http://127.0.0.1:" + port,
                                 "deepseek-flash", 0.1, 500, connectTimeoutMs, readTimeoutMs),
                         new AgentProperties.Limits(3, 2, 12000, 60000, 6000, 60)));

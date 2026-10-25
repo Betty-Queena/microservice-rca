@@ -21,6 +21,8 @@ public interface AgentOrchestrator {
             UUID faultEventId,
             UUID diagnosisTaskId,
             String serviceName,
+            String serviceKind,
+            List<String> allowedServices,
             String eventType,
             String severity,
             String summary,
@@ -29,7 +31,12 @@ public interface AgentOrchestrator {
             Instant windowStart,
             Instant windowEnd,
             List<DiagnosticToolRegistry.ToolDefinition> availableTools,
+            Map<String, String> unavailableTools,
             Limits limits) {
+
+        public AgentInput {
+            unavailableTools = unavailableTools == null ? Map.of() : Map.copyOf(unavailableTools);
+        }
     }
 
     record Limits(
@@ -68,6 +75,17 @@ public interface AgentOrchestrator {
                                                           String modelName) {
             return new AgentRunResult(RunStatus.INSUFFICIENT_EVIDENCE, report, null,
                     trace, modelName, null);
+        }
+
+        /**
+         * 任务执行成功，但只形成了低置信度假说，未达到“已定位根因”的结果语义。
+         * 复用现有 INSUFFICIENT_EVIDENCE 结果状态以保持数据库/API 兼容。
+         */
+        public static AgentRunResult lowConfidenceHypothesis(Map<String, Object> report,
+                                                             List<Map<String, Object>> trace,
+                                                             String modelName) {
+            return new AgentRunResult(RunStatus.INSUFFICIENT_EVIDENCE, report, null,
+                    trace, modelName, "LOW");
         }
 
         public static AgentRunResult failed(String reason,

@@ -76,6 +76,23 @@ class AgentReportValidatorTest {
                 .hasMessageContaining("未知服务");
     }
 
+    @Test
+    void externalReportOnlyAcceptsRegisteredService() {
+        Map<String, Object> raw = report(List.of("log:order-service:log-1"));
+        raw.put("affectedServices", List.of("petclinic"));
+
+        AgentReportValidator.ValidatedReport validated = validator.validate(
+                raw, known, List.of("petclinic"));
+        assertThat(validated.report().get("affectedServices"))
+                .isEqualTo(List.of("petclinic"));
+
+        Map<String, Object> other = report(List.of("log:order-service:log-1"));
+        other.put("affectedServices", List.of("order-service"));
+        assertThatThrownBy(() -> validator.validate(other, known, List.of("petclinic")))
+                .isInstanceOf(AgentValidationException.class)
+                .hasMessageContaining("未知服务");
+    }
+
     private Map<String, Object> report(List<String> supporting) {
         Map<String, Object> report = new LinkedHashMap<>();
         report.put("rootCause", "库存服务响应延迟导致订单结算超时");

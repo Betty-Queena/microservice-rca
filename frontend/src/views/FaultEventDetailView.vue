@@ -15,6 +15,7 @@ import {
   retryAgentTask,
   startAgentDiagnosis
 } from '../api/agentDiagnosis'
+import RemediationPanel from '../components/RemediationPanel.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -35,6 +36,7 @@ const agentRetrying = ref(false)
 let agentPollTimer = null
 
 const event = computed(() => detail.value?.event || null)
+const isExternal = computed(() => event.value?.source === 'EXTERNAL')
 const tasks = computed(() => detail.value?.diagnosisTasks || [])
 const evidence = computed(() => event.value?.evidence || null)
 const evidenceTools = computed(() => evidence.value?.tools || [])
@@ -67,11 +69,19 @@ const evidenceAlertTitle = computed(() => {
   }
 })
 
+const healthTool = computed(
+  () => evidenceTools.value.find((item) => item.toolName === 'query_health') || null
+)
 const logsTool = computed(() => evidenceTools.value.find((item) => item.toolName === 'query_logs') || null)
 const metricsTool = computed(
   () => evidenceTools.value.find((item) => item.toolName === 'query_metrics') || null
 )
 const logItems = computed(() => logsTool.value?.output?.items || [])
+const healthComponents = computed(() => healthTool.value?.output?.components || [])
+const externalMetrics = computed(() => metricsTool.value?.output?.metrics || [])
+const availableToolCards = computed(() =>
+  isExternal.value ? tools.value : tools.value.filter((tool) => tool.name !== 'query_health')
+)
 const metricServices = computed(() => metricsTool.value?.output?.services || [])
 const metricRows = computed(() =>
   metricServices.value.flatMap((service) =>
@@ -93,6 +103,11 @@ const agentRootCause = computed(
 )
 const agentInsufficient = computed(
   () => agentTask.value?.resultStatus === 'INSUFFICIENT_EVIDENCE'
+)
+const agentHypothesis = computed(
+  () =>
+    agentInsufficient.value &&
+    agentReport.value?.assessment === 'LOW_CONFIDENCE_HYPOTHESIS'
 )
 const supportingEvidence = computed(() => agentReport.value?.supportingEvidenceIds || [])
 const contradictingEvidence = computed(() => agentReport.value?.contradictingEvidenceIds || [])
@@ -118,6 +133,11 @@ function pretty(value) {
   } catch (ex) {
     return String(value)
   }
+}
+
+function formatMeasurements(measurements) {
+  if (!Array.isArray(measurements) || !measurements.length) return '—'
+  return measurements.map((item) => `${item.statistic}=${item.value}`).join('、')
 }
 
 function statusType(status) {
@@ -155,7 +175,10 @@ function agentStatusText(status) {
   return { PENDING: '排队中', RUNNING: '调查中', SUCCEEDED: '已完成', FAILED: '执行失败' }[status] || status
 }
 
-function resultStatusText(status) {
+function resultStatusText(status, confidenceLevel) {
+  if (status === 'INSUFFICIENT_EVIDENCE' && confidenceLevel === 'LOW') {
+    return '低置信度假说'
+  }
   return {
     ROOT_CAUSE_IDENTIFIED: '已识别根因',
     INSUFFICIENT_EVIDENCE: '证据不足'
@@ -267,10 +290,12 @@ async function handleCollect() {
   try {
     const result = await collectFaultEventEvidence(route.params.eventId, {
       requestId: event.value?.requestId || undefined,
-      logLimit: 100
+      logLimit: 100,
+      // 外部事件的证据范围由后端固定为事件关联服务；显式传递便于审计。
+      serviceName: isExternal.value ? event.value?.serviceName : undefined
     })
     await load()
-    activeTab.value = 'logs'
+    activeTab.value = isExternal.value ? 'health' : 'logs'
 
     const tools = Array.isArray(result?.tools) ? result.tools : []
     const successCount = tools.filter((item) => item.success === true).length
@@ -433,6 +458,11 @@ async function handleRetryAgent() {
   }
 }
 
+async function handleRemediationChanged() {
+  // 处置成功后刷新事件，展示最新的 RESOLVED 状态；处置记录由面板自行刷新。
+  await load()
+}
+
 onMounted(async () => {
   await Promise.all([load(), loadTools()])
   await loadAgentTasks()
@@ -505,8 +535,11 @@ onBeforeUnmount(stopAgentPolling)
             <el-tag :type="severityType(event.severity)" effect="light">{{ event.severity }}</el-tag>
           </el-descriptions-item>
           <el-descriptions-item label="来源">
-            <el-tag :type="event.source === 'EXPERIMENT' ? 'warning' : 'info'" effect="plain">
-              {{ event.source === 'EXPERIMENT' ? '故障注入实验' : '人工录入' }}
+            <el-tag
+              :type="{ EXPERIMENT: 'warning', EXTERNAL: 'success' }[event.source] || 'info'"
+              effect="plain"
+            >
+              {{ { EXPERIMENT: '故障注入实验', EXTERNAL: '外部服务' }[event.source] || '人工录入' }}
             </el-tag>
           </el-descriptions-item>
           <el-descriptions-item label="发生时间">{{ formatTime(event.occurredAt) }}</el-descriptions-item>
@@ -514,8 +547,8 @@ onBeforeUnmount(stopAgentPolling)
           <el-descriptions-item label="请求 ID">
             <code>{{ event.requestId || '—' }}</code>
           </el-descriptions-item>
-          <el-descriptions-item label="实验 ID">
-            <code>{{ event.experimentId || '—' }}</code>
+          <el-descriptions-item :label="isExternal ? '外部服务 ID' : '实验 ID'">
+            <code>{{ isExternal ? (event.externalServiceId || '—') : (event.experimentId || '—') }}</code>
           </el-descriptions-item>
           <el-descriptions-item label="证据采集时间">
             {{ formatTime(event.evidenceCollectedAt) }}
@@ -527,13 +560,39 @@ onBeforeUnmount(stopAgentPolling)
         <template #header>
           <div class="card-header">
             <div>
-              <div class="card-title">实验预设与实际观测</div>
-              <div class="card-subtitle">两者分开保存；预设故障类型不是根因结论</div>
+              <div class="card-title">{{ isExternal ? '外部服务诊断范围' : '实验预设与实际观测' }}</div>
+              <div class="card-subtitle">
+                {{ isExternal
+                  ? '外部事件没有实验预设；证据只来自 Actuator 快照和显式配置的日志源'
+                  : '两者分开保存；预设故障类型不是根因结论' }}
+              </div>
             </div>
           </div>
         </template>
 
-        <el-row :gutter="16">
+        <template v-if="isExternal">
+          <el-descriptions :column="2" border size="small">
+            <el-descriptions-item label="外部服务">{{ event.serviceName }}</el-descriptions-item>
+            <el-descriptions-item label="服务 ID">
+              <code>{{ event.externalServiceId || '—' }}</code>
+            </el-descriptions-item>
+            <el-descriptions-item label="诊断范围" :span="2">
+              只读 Actuator 健康与指标快照；日志仅在显式配置日志数据源时可用
+            </el-descriptions-item>
+            <el-descriptions-item label="实验预设" :span="2">
+              不适用：外部事件不使用实验故障类型、实验参数或预设根因
+            </el-descriptions-item>
+          </el-descriptions>
+          <el-alert
+            type="success"
+            :closable="false"
+            show-icon
+            title="外部服务第一版只支持诊断与处置建议，不能通过本系统重启、停止或修改外部服务"
+            class="sub-alert"
+          />
+        </template>
+
+        <el-row v-else :gutter="16">
           <el-col :xs="24" :lg="12">
             <div class="sub-card">
               <div class="sub-title">
@@ -592,7 +651,9 @@ onBeforeUnmount(stopAgentPolling)
             <div>
               <div class="card-title">证据采集与诊断证据</div>
               <div class="card-subtitle">
-                调用真实 query_logs / query_metrics，写入 diagnosis_task 与 tool_invocation
+                {{ isExternal
+                  ? '调用真实 query_health / query_metrics / query_logs，写入 diagnosis_task 与 tool_invocation'
+                  : '调用真实 query_logs / query_metrics，写入 diagnosis_task 与 tool_invocation' }}
               </div>
             </div>
             <el-button
@@ -619,6 +680,9 @@ onBeforeUnmount(stopAgentPolling)
             <span>requestId：{{ evidence.requestId || '全部' }}</span>
             <span>服务范围：{{ evidence.serviceName || 'all' }}</span>
             <span>工具结果：{{ evidenceSuccessCount }} / {{ evidenceToolCount }} 成功</span>
+            <span v-if="evidence.timeWindowSupported === false">
+              时间窗口：外部快照型证据，不支持历史窗口过滤
+            </span>
           </div>
         </el-alert>
         <el-alert
@@ -627,11 +691,22 @@ onBeforeUnmount(stopAgentPolling)
           :closable="false"
           show-icon
           title="尚未采集证据"
-          description="点击“采集真实证据”会调用诊断工具查询两个实验服务的日志与指标，并写入数据库。"
+          :description="isExternal
+            ? '点击“采集真实证据”会调用 Actuator 健康/指标与显式配置的日志数据源；不可用的证据会明确记录失败原因。'
+            : '点击“采集真实证据”会调用诊断工具查询两个实验服务的日志与指标，并写入数据库。'"
         />
 
         <el-tabs v-model="activeTab" class="detail-tabs">
-          <el-tab-pane label="实际请求结果" name="result">
+          <el-tab-pane :label="isExternal ? '事件上下文' : '实际请求结果'" name="result">
+            <el-alert
+              v-if="isExternal"
+              type="info"
+              :closable="false"
+              show-icon
+              title="外部事件没有实验请求观测结果"
+              description="外部诊断只使用 Actuator 快照与显式配置的日志源，不使用实验故障类型、参数或预设根因。"
+              class="sub-alert"
+            />
             <div class="json-grid">
               <div>
                 <div class="json-title">observed_result（实际观测）</div>
@@ -642,6 +717,83 @@ onBeforeUnmount(stopAgentPolling)
                 <pre class="json-block">{{ pretty(details) }}</pre>
               </div>
             </div>
+          </el-tab-pane>
+
+          <el-tab-pane v-if="isExternal" label="健康快照" name="health">
+            <template v-if="healthTool">
+              <el-alert
+                v-if="!healthTool.success"
+                type="error"
+                :closable="false"
+                show-icon
+                :title="healthTool.error || 'query_health 采集失败'"
+              />
+              <template v-else>
+                <div class="source-line">
+                  <span>数据来源：{{ (healthTool.output?.dataSources || []).join('、') || '—' }}</span>
+                  <span>状态：{{ healthTool.output?.status || '—' }}</span>
+                  <span>HTTP：{{ healthTool.output?.httpStatus ?? '—' }}</span>
+                  <span>耗时：{{ healthTool.output?.latencyMs ?? '—' }} ms</span>
+                  <span>工具调用 ID：<code>{{ healthTool.invocationId }}</code></span>
+                </div>
+                <el-descriptions :column="2" border size="small">
+                  <el-descriptions-item label="Actuator 状态">
+                    {{ healthTool.output?.status || '—' }}
+                  </el-descriptions-item>
+                  <el-descriptions-item label="采集时间">
+                    {{ formatTime(healthTool.output?.collectedAt) }}
+                  </el-descriptions-item>
+                  <el-descriptions-item label="证据 ID" :span="2">
+                    <code
+                      v-for="evidenceId in healthTool.output?.evidenceIds || []"
+                      :key="evidenceId"
+                      class="evidence-code"
+                    >
+                      {{ evidenceId }}
+                    </code>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="数据说明" :span="2">
+                    {{ healthTool.output?.dataNote || '—' }}
+                  </el-descriptions-item>
+                </el-descriptions>
+                <template v-if="healthComponents.length">
+                  <div class="json-title">组件状态（{{ healthComponents.length }}）</div>
+                  <el-table :data="healthComponents" stripe size="small" max-height="420">
+                    <el-table-column prop="path" label="组件" width="160" show-overflow-tooltip />
+                    <el-table-column prop="status" label="状态" width="100" />
+                    <el-table-column prop="errorType" label="错误类型" min-width="190" show-overflow-tooltip />
+                    <el-table-column prop="errorSummary" label="错误摘要（已脱敏）" min-width="260" show-overflow-tooltip />
+                    <el-table-column label="证据 ID" min-width="240" show-overflow-tooltip>
+                      <template #default="{ row }">
+                        <code>{{ row.evidenceId }}</code>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="明细" width="90">
+                      <template #default="{ row }">{{ row.detailsOmitted ? '已省略' : '—' }}</template>
+                    </el-table-column>
+                    <template #empty>
+                      <el-empty description="健康端点未返回组件明细" :image-size="60" />
+                    </template>
+                  </el-table>
+                  <el-alert
+                    v-if="healthTool.output?.componentsTruncated"
+                    type="warning"
+                    :closable="false"
+                    show-icon
+                    :title="`组件明细已截断，未返回约 ${healthTool.output?.omittedComponentCount ?? 0} 个组件`"
+                    class="sub-alert"
+                  />
+                </template>
+                <el-alert
+                  type="info"
+                  :closable="false"
+                  show-icon
+                  title="健康快照只反映采集瞬间的状态；组件错误摘要已脱敏，未返回的组件不会被推断为正常"
+                  class="sub-alert"
+                />
+              </template>
+            </template>
+            <el-empty v-else description="尚未采集健康证据" :image-size="70" />
           </el-tab-pane>
 
           <el-tab-pane label="关联日志" name="logs">
@@ -657,9 +809,21 @@ onBeforeUnmount(stopAgentPolling)
                 <div class="source-line">
                   <span>数据来源：{{ (logsTool.output?.dataSources || []).join('、') || '—' }}</span>
                   <span>证据条数：{{ logsTool.output?.itemCount ?? logItems.length }}</span>
+                  <span v-if="isExternal">时间窗口：快照型日志源，不支持历史窗口过滤</span>
                   <span>工具调用 ID：<code>{{ logsTool.invocationId }}</code></span>
                 </div>
-                <el-table :data="logItems" stripe size="small" max-height="420">
+                <template v-if="isExternal">
+                  <el-alert
+                    type="info"
+                    :closable="false"
+                    show-icon
+                    :title="logsTool.output?.dataNote || '日志来自显式配置的只读日志数据源'"
+                    class="sub-alert"
+                  />
+                  <div class="json-title">日志条目（原始字段）</div>
+                  <pre class="json-block">{{ pretty(logItems) }}</pre>
+                </template>
+                <el-table v-else :data="logItems" stripe size="small" max-height="420">
                   <el-table-column prop="timestamp" label="时间" width="190">
                     <template #default="{ row }">{{ formatTime(row.timestamp) }}</template>
                   </el-table-column>
@@ -692,48 +856,72 @@ onBeforeUnmount(stopAgentPolling)
                 <div class="source-line">
                   <span>数据来源：{{ (metricsTool.output?.dataSources || []).join('、') || '—' }}</span>
                   <span>查询服务：{{ metricsTool.output?.query?.service || 'all' }}</span>
+                  <span v-if="isExternal">时间窗口：快照型指标，不支持历史窗口过滤</span>
                   <span>工具调用 ID：<code>{{ metricsTool.invocationId }}</code></span>
                 </div>
-                <div class="json-title">分钟级指标汇总</div>
-                <el-table :data="metricServices" stripe size="small">
-                  <el-table-column prop="serviceName" label="服务" width="160" />
-                  <el-table-column prop="source" label="数据来源" min-width="260" show-overflow-tooltip />
-                  <el-table-column label="请求数" width="90">
-                    <template #default="{ row }">{{ row.summary?.requestCount ?? 0 }}</template>
-                  </el-table-column>
-                  <el-table-column label="5xx" width="80">
-                    <template #default="{ row }">{{ row.summary?.serverErrorCount ?? 0 }}</template>
-                  </el-table-column>
-                  <el-table-column label="4xx" width="80">
-                    <template #default="{ row }">{{ row.summary?.clientErrorCount ?? 0 }}</template>
-                  </el-table-column>
-                  <el-table-column label="平均耗时(ms)" width="120">
-                    <template #default="{ row }">
-                      {{ Math.round(row.summary?.averageDurationMs ?? 0) }}
+                <template v-if="isExternal">
+                  <el-alert
+                    type="info"
+                    :closable="false"
+                    show-icon
+                    :title="metricsTool.output?.dataNote || 'Actuator 指标为本次采集快照'"
+                    class="sub-alert"
+                  />
+                  <div class="json-title">Actuator 指标快照（{{ externalMetrics.length }}）</div>
+                  <el-table :data="externalMetrics" stripe size="small" max-height="420">
+                    <el-table-column prop="name" label="指标" width="240" show-overflow-tooltip />
+                    <el-table-column prop="description" label="说明" min-width="240" show-overflow-tooltip />
+                    <el-table-column prop="baseUnit" label="单位" width="90" />
+                    <el-table-column label="测量值" min-width="200" show-overflow-tooltip>
+                      <template #default="{ row }">{{ formatMeasurements(row.measurements) }}</template>
+                    </el-table-column>
+                    <template #empty>
+                      <el-empty description="未采集到指标数据" :image-size="60" />
                     </template>
-                  </el-table-column>
-                  <el-table-column label="最大耗时(ms)" width="120">
-                    <template #default="{ row }">{{ row.summary?.maxDurationMs ?? 0 }}</template>
-                  </el-table-column>
-                </el-table>
+                  </el-table>
+                </template>
+                <template v-else>
+                  <div class="json-title">分钟级指标汇总</div>
+                  <el-table :data="metricServices" stripe size="small">
+                    <el-table-column prop="serviceName" label="服务" width="160" />
+                    <el-table-column prop="source" label="数据来源" min-width="260" show-overflow-tooltip />
+                    <el-table-column label="请求数" width="90">
+                      <template #default="{ row }">{{ row.summary?.requestCount ?? 0 }}</template>
+                    </el-table-column>
+                    <el-table-column label="5xx" width="80">
+                      <template #default="{ row }">{{ row.summary?.serverErrorCount ?? 0 }}</template>
+                    </el-table-column>
+                    <el-table-column label="4xx" width="80">
+                      <template #default="{ row }">{{ row.summary?.clientErrorCount ?? 0 }}</template>
+                    </el-table-column>
+                    <el-table-column label="平均耗时(ms)" width="120">
+                      <template #default="{ row }">
+                        {{ Math.round(row.summary?.averageDurationMs ?? 0) }}
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="最大耗时(ms)" width="120">
+                      <template #default="{ row }">{{ row.summary?.maxDurationMs ?? 0 }}</template>
+                    </el-table-column>
+                  </el-table>
 
-                <div class="json-title metric-title">分钟桶明细</div>
-                <el-table :data="metricRows" stripe size="small" max-height="320">
-                  <el-table-column prop="serviceName" label="服务" width="160" />
-                  <el-table-column prop="minute" label="分钟" width="190">
-                    <template #default="{ row }">{{ formatTime(row.minute) }}</template>
-                  </el-table-column>
-                  <el-table-column prop="requestCount" label="请求数" width="90" />
-                  <el-table-column prop="serverErrorCount" label="5xx" width="80" />
-                  <el-table-column prop="clientErrorCount" label="4xx" width="80" />
-                  <el-table-column label="平均耗时(ms)" width="120">
-                    <template #default="{ row }">{{ Math.round(row.averageDurationMs ?? 0) }}</template>
-                  </el-table-column>
-                  <el-table-column prop="maxDurationMs" label="最大耗时(ms)" width="120" />
-                  <template #empty>
-                    <el-empty description="查询窗口内没有分钟级指标" :image-size="60" />
-                  </template>
-                </el-table>
+                  <div class="json-title metric-title">分钟桶明细</div>
+                  <el-table :data="metricRows" stripe size="small" max-height="320">
+                    <el-table-column prop="serviceName" label="服务" width="160" />
+                    <el-table-column prop="minute" label="分钟" width="190">
+                      <template #default="{ row }">{{ formatTime(row.minute) }}</template>
+                    </el-table-column>
+                    <el-table-column prop="requestCount" label="请求数" width="90" />
+                    <el-table-column prop="serverErrorCount" label="5xx" width="80" />
+                    <el-table-column prop="clientErrorCount" label="4xx" width="80" />
+                    <el-table-column label="平均耗时(ms)" width="120">
+                      <template #default="{ row }">{{ Math.round(row.averageDurationMs ?? 0) }}</template>
+                    </el-table-column>
+                    <el-table-column prop="maxDurationMs" label="最大耗时(ms)" width="120" />
+                    <template #empty>
+                      <el-empty description="查询窗口内没有分钟级指标" :image-size="60" />
+                    </template>
+                  </el-table>
+                </template>
               </template>
             </template>
             <el-empty v-else description="尚未采集指标证据" :image-size="70" />
@@ -796,7 +984,9 @@ onBeforeUnmount(stopAgentPolling)
               <div>
                 <div class="agent-title">DeepSeek Agent 自主诊断</div>
                 <div class="card-subtitle">
-                  模型逐轮决定调用 query_logs / query_metrics 或结束调查；只允许只读工具，结论必须引用真实证据
+                  {{ isExternal
+                    ? '模型逐轮决定调用 query_health / query_metrics / query_logs 或结束调查；外部诊断不使用实验预设，只引用真实证据'
+                    : '模型逐轮决定调用 query_logs / query_metrics 或结束调查；只允许只读工具，结论必须引用真实证据' }}
                 </div>
               </div>
               <div class="header-actions">
@@ -829,7 +1019,9 @@ onBeforeUnmount(stopAgentPolling)
               :closable="false"
               show-icon
               title="尚未启动 AI 诊断"
-              description="点击“启动AI诊断”后，Agent 会基于事件观测结果自主选择只读工具并多轮调查。若后端未配置 DEEPSEEK_API_KEY，任务会明确失败，不会生成伪造结论。"
+              :description="isExternal
+                ? '点击“启动AI诊断”后，Agent 会基于外部服务真实 Actuator 健康/指标与显式日志源自主调查；证据不可用时会明确说明，不会生成伪造结论。'
+                : '点击“启动AI诊断”后，Agent 会基于事件观测结果自主选择只读工具并多轮调查。若后端未配置 DEEPSEEK_API_KEY，任务会明确失败，不会生成伪造结论。'"
             />
 
             <template v-else>
@@ -838,7 +1030,7 @@ onBeforeUnmount(stopAgentPolling)
                   {{ agentStatusText(agentTask.status) }}
                 </el-tag>
                 <el-tag v-if="agentTask.resultStatus" :type="resultStatusType(agentTask.resultStatus)" effect="light">
-                  {{ resultStatusText(agentTask.resultStatus) }}
+                  {{ resultStatusText(agentTask.resultStatus, agentTask.confidenceLevel) }}
                 </el-tag>
                 <span class="muted">触发：{{ triggerText(agentTask.triggerSource) }}</span>
                 <span class="muted">模型：{{ agentTask.modelName || '未调用' }}</span>
@@ -862,6 +1054,15 @@ onBeforeUnmount(stopAgentPolling)
                 show-icon
                 title="Agent 执行失败，未生成诊断结论"
                 :description="agentTask.failureReason || '未记录失败原因'"
+              />
+              <el-alert
+                v-else-if="agentHypothesis"
+                type="warning"
+                :closable="false"
+                show-icon
+                title="仅形成低置信度假说，未定位根因"
+                :description="agentReport?.assessmentNote
+                  || '模型置信度为 LOW 且没有组件级证据；下方内容只作为待验证假设，不能当作已确认根因。'"
               />
               <el-alert
                 v-else-if="agentInsufficient"
@@ -919,6 +1120,15 @@ onBeforeUnmount(stopAgentPolling)
                 </template>
 
                 <div class="root-cause">{{ agentReport.rootCause }}</div>
+                <el-alert
+                  v-if="isExternal"
+                  type="info"
+                  :closable="false"
+                  show-icon
+                  title="事实证据与模型推断分开呈现"
+                  description="支持/反驳证据 ID 来自真实工具输出；根因、故障假设与处置建议均为模型推断，需要人工确认；分析限制见下方。"
+                  class="sub-alert report-alert"
+                />
                 <el-descriptions :column="2" border size="small">
                   <el-descriptions-item label="影响服务">
                     <el-tag
@@ -979,7 +1189,51 @@ onBeforeUnmount(stopAgentPolling)
                 </div>
               </el-card>
 
-              <el-card v-if="agentInsufficient && agentReport" shadow="never" class="agent-report-card">
+              <el-card v-if="agentHypothesis && agentReport" shadow="never" class="agent-report-card">
+                <template #header>
+                  <div class="card-title">低置信度假说（未定位根因）</div>
+                </template>
+                <el-descriptions :column="1" border size="small">
+                  <el-descriptions-item label="模型给出的可能原因">
+                    {{ agentReport.rootCause || '—' }}
+                  </el-descriptions-item>
+                  <el-descriptions-item label="可验证假设">
+                    {{ agentReport.hypothesis || '—' }}
+                  </el-descriptions-item>
+                  <el-descriptions-item label="置信等级">
+                    <el-tag type="info" effect="dark">LOW</el-tag>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="组件级证据">
+                    {{ agentReport.componentEvidenceAvailable ? '已获得' : '未获得' }}
+                  </el-descriptions-item>
+                  <el-descriptions-item label="支持证据">
+                    <template v-if="supportingEvidence.length">
+                      <code
+                        v-for="evidenceId in supportingEvidence"
+                        :key="evidenceId"
+                        class="evidence-code"
+                      >
+                        {{ evidenceId }}
+                      </code>
+                    </template>
+                    <span v-else>无</span>
+                  </el-descriptions-item>
+                </el-descriptions>
+                <div v-if="recommendations.length" class="report-section">
+                  <div class="json-title">建议人工核查方向</div>
+                  <ul class="limit-list">
+                    <li v-for="item in recommendations" :key="item">{{ item }}</li>
+                  </ul>
+                </div>
+                <div v-if="limitations.length" class="report-section">
+                  <div class="json-title">分析限制</div>
+                  <ul class="limit-list">
+                    <li v-for="item in limitations" :key="item">{{ item }}</li>
+                  </ul>
+                </div>
+              </el-card>
+
+              <el-card v-if="agentInsufficient && !agentHypothesis && agentReport" shadow="never" class="agent-report-card">
                 <template #header>
                   <div class="card-title">证据不足说明</div>
                 </template>
@@ -1077,7 +1331,7 @@ onBeforeUnmount(stopAgentPolling)
                 </el-table-column>
                 <el-table-column label="结论" width="120">
                   <template #default="{ row }">
-                    {{ row.resultStatus ? resultStatusText(row.resultStatus) : '—' }}
+                    {{ row.resultStatus ? resultStatusText(row.resultStatus, row.confidenceLevel) : '—' }}
                   </template>
                 </el-table-column>
                 <el-table-column label="置信" width="80">
@@ -1100,7 +1354,7 @@ onBeforeUnmount(stopAgentPolling)
 
             <div class="json-title tool-title">已注册诊断工具</div>
             <div class="tool-grid">
-              <div v-for="tool in tools" :key="tool.name" class="tool-card">
+              <div v-for="tool in availableToolCards" :key="tool.name" class="tool-card">
                 <div class="tool-name">{{ tool.name }}</div>
                 <div class="tool-desc">{{ tool.description }}</div>
               </div>
@@ -1108,6 +1362,26 @@ onBeforeUnmount(stopAgentPolling)
           </el-tab-pane>
         </el-tabs>
       </el-card>
+
+      <el-card v-if="isExternal" shadow="never" class="panel-card">
+        <template #header>
+          <div class="card-title">处置与恢复</div>
+        </template>
+        <el-alert
+          type="success"
+          :closable="false"
+          show-icon
+          title="外部服务不接入实验故障处置"
+          description="外部服务第一版只提供诊断结论与处置建议；不会调用故障关闭、重启、停止或修改配置等接口，所有处置需在外部系统由人工执行。"
+        />
+      </el-card>
+      <RemediationPanel
+        v-else
+        :key="event.id"
+        :event="event"
+        :agent-tasks="agentTasks"
+        @changed="handleRemediationChanged"
+      />
     </template>
   </div>
 </template>
@@ -1164,6 +1438,10 @@ onBeforeUnmount(stopAgentPolling)
 
 .sub-alert {
   margin-top: 12px;
+}
+
+.report-alert {
+  margin-bottom: 14px;
 }
 
 .data-note {

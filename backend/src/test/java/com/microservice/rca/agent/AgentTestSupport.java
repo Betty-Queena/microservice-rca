@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.microservice.rca.common.JsonSupport;
 import com.microservice.rca.diagnosis.domain.ToolInvocation;
 import com.microservice.rca.diagnosis.repository.ToolInvocationRepository;
+import com.microservice.rca.external.service.ExternalServiceRegistry;
 import com.microservice.rca.tools.DiagnosticTool;
 import com.microservice.rca.tools.DiagnosticToolRegistry;
 import com.microservice.rca.tools.ToolInvocationService;
@@ -36,6 +37,7 @@ final class AgentTestSupport {
 
     static AgentProperties properties(int maxModelCalls, int maxToolCalls) {
         return new AgentProperties(
+                true,
                 new AgentProperties.DeepSeek("test-key", "http://localhost", "mock-deepseek",
                         0.1, 500, 1000, 5000),
                 new AgentProperties.Limits(maxModelCalls, maxToolCalls,
@@ -63,6 +65,12 @@ final class AgentTestSupport {
 
     static DiagnosticToolRegistry registry(DiagnosticTool... tools) {
         return new DiagnosticToolRegistry(List.of(tools));
+    }
+
+    static ExternalServiceRegistry externalServiceRegistry() {
+        ExternalServiceRegistry registry = mock(ExternalServiceRegistry.class);
+        when(registry.findByName(any(String.class))).thenReturn(java.util.Optional.empty());
+        return registry;
     }
 
     static ToolInvocationRepository invocationRepository() {
@@ -95,6 +103,8 @@ final class AgentTestSupport {
                 UUID.randomUUID(),
                 UUID.randomUUID(),
                 "inventory-service",
+                "BUILT_IN",
+                List.of("all", "order-service", "inventory-service"),
                 "DOWNSTREAM_TIMEOUT",
                 "ERROR",
                 "订单结算调用库存服务超时",
@@ -107,6 +117,50 @@ final class AgentTestSupport {
                 end.minusSeconds(900),
                 end,
                 registry.definitions(),
+                Map.of(),
+                new AgentOrchestrator.Limits(maxModelCalls, maxToolCalls,
+                        12000, 60000, 6000, overallTimeout));
+    }
+
+    static AgentOrchestrator.AgentInput externalInput(DiagnosticToolRegistry registry,
+                                                      String serviceName,
+                                                      int maxModelCalls,
+                                                      int maxToolCalls) {
+        return externalInput(registry, serviceName, maxModelCalls, maxToolCalls,
+                Map.of(), java.time.Duration.ofSeconds(60));
+    }
+
+    static AgentOrchestrator.AgentInput externalInput(DiagnosticToolRegistry registry,
+                                                      String serviceName,
+                                                      int maxModelCalls,
+                                                      int maxToolCalls,
+                                                      java.time.Duration overallTimeout) {
+        return externalInput(registry, serviceName, maxModelCalls, maxToolCalls,
+                Map.of(), overallTimeout);
+    }
+
+    static AgentOrchestrator.AgentInput externalInput(DiagnosticToolRegistry registry,
+                                                      String serviceName,
+                                                      int maxModelCalls,
+                                                      int maxToolCalls,
+                                                      Map<String, String> unavailableTools,
+                                                      java.time.Duration overallTimeout) {
+        Instant end = Instant.parse("2026-10-21T02:00:00Z");
+        return new AgentOrchestrator.AgentInput(
+                UUID.randomUUID(),
+                UUID.randomUUID(),
+                serviceName,
+                "EXTERNAL",
+                List.of(serviceName),
+                "EXTERNAL_ANOMALY",
+                "WARNING",
+                "外部服务 " + serviceName + " 运行状态需要诊断",
+                Map.of(),
+                null,
+                end.minusSeconds(900),
+                end,
+                registry.definitions(),
+                unavailableTools,
                 new AgentOrchestrator.Limits(maxModelCalls, maxToolCalls,
                         12000, 60000, 6000, overallTimeout));
     }
@@ -121,13 +175,23 @@ final class AgentTestSupport {
     }
 
     static String finalReport(List<String> supportingEvidenceIds) {
+        return finalReport(supportingEvidenceIds, "HIGH", "inventory-service");
+    }
+
+    static String finalReport(List<String> supportingEvidenceIds, String confidenceLevel) {
+        return finalReport(supportingEvidenceIds, confidenceLevel, "inventory-service");
+    }
+
+    static String finalReport(List<String> supportingEvidenceIds,
+                              String confidenceLevel,
+                              String affectedService) {
         Map<String, Object> report = new LinkedHashMap<>();
         report.put("rootCause", "库存服务响应延迟导致订单结算超时");
-        report.put("affectedServices", List.of("inventory-service"));
+        report.put("affectedServices", List.of(affectedService));
         report.put("hypothesis", "库存服务在真实请求中耗时超过订单服务读取超时");
         report.put("supportingEvidenceIds", supportingEvidenceIds);
         report.put("contradictingEvidenceIds", List.of());
-        report.put("confidenceLevel", "HIGH");
+        report.put("confidenceLevel", confidenceLevel);
         report.put("recommendedActions", List.of("人工确认后检查库存服务实例负载"));
         report.put("limitations", List.of("当前仅有日志与分钟级指标，没有调用链数据"));
 
@@ -199,7 +263,10 @@ final class AgentTestSupport {
             if (next instanceof RuntimeException exception) {
                 throw exception;
             }
-            return new ModelResponse((String) next, modelName(), 12, 8, true);
+            if (next instanceof ModelResponse response) {
+                return response;
+            }
+            return new ModelResponse((String) next, modelName(), 12, 8, true, null);
         }
 
         List<ModelRequest> requests() {

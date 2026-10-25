@@ -84,6 +84,31 @@ class FaultEventServiceTest {
     }
 
     @Test
+    void resolveIfOpenUsesConditionalUpdateWithResolvedAt() {
+        UUID eventId = UUID.randomUUID();
+        when(eventRepository.resolveIfOpen(
+                eq(eventId), eq(FaultEventStatus.OPEN), eq(FaultEventStatus.RESOLVED),
+                any(Instant.class)))
+                .thenReturn(1);
+
+        assertThat(service.resolveIfOpen(eventId)).isTrue();
+        verify(eventRepository).resolveIfOpen(
+                eq(eventId), eq(FaultEventStatus.OPEN), eq(FaultEventStatus.RESOLVED),
+                any(Instant.class));
+    }
+
+    @Test
+    void resolveIfOpenDoesNotOverwriteNonOpenEvent() {
+        UUID eventId = UUID.randomUUID();
+        when(eventRepository.resolveIfOpen(
+                eq(eventId), eq(FaultEventStatus.OPEN), eq(FaultEventStatus.RESOLVED),
+                any(Instant.class)))
+                .thenReturn(0);
+
+        assertThat(service.resolveIfOpen(eventId)).isFalse();
+    }
+
+    @Test
     void setsResolvedAtOnlyWhenResolvingWithoutExistingValue() {
         UUID eventId = UUID.randomUUID();
         FaultEvent event = event(eventId, FaultEventStatus.OPEN, null);

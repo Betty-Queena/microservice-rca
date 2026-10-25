@@ -1,5 +1,8 @@
 package com.microservice.rca.tools;
 
+import com.microservice.rca.external.client.ExternalActuatorClient;
+import com.microservice.rca.external.domain.ExternalService;
+import com.microservice.rca.external.service.ExternalServiceRegistry;
 import com.microservice.rca.observability.ObservabilityClient;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -7,6 +10,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import org.springframework.stereotype.Component;
 
 /**
@@ -19,9 +23,15 @@ public class QueryLogsTool implements DiagnosticTool {
     private static final int MAX_LIMIT = 200;
 
     private final ObservabilityClient observabilityClient;
+    private final ExternalServiceRegistry externalServiceRegistry;
+    private final ExternalActuatorClient externalActuatorClient;
 
-    public QueryLogsTool(ObservabilityClient observabilityClient) {
+    public QueryLogsTool(ObservabilityClient observabilityClient,
+                         ExternalServiceRegistry externalServiceRegistry,
+                         ExternalActuatorClient externalActuatorClient) {
         this.observabilityClient = observabilityClient;
+        this.externalServiceRegistry = externalServiceRegistry;
+        this.externalActuatorClient = externalActuatorClient;
     }
 
     @Override
@@ -31,7 +41,7 @@ public class QueryLogsTool implements DiagnosticTool {
 
     @Override
     public String description() {
-        return "按服务、时间窗口、requestId 查询真实业务请求日志（只读，最多 200 条）";
+        return "查询真实业务请求日志：内置实验服务按时间窗口查询，已注册外部服务只读显式配置的日志数据源（最多 200 条）";
     }
 
     @Override
@@ -44,6 +54,11 @@ public class QueryLogsTool implements DiagnosticTool {
                     ? "all" : context.serviceName();
             int limit = intParam(context.parameters(), "limit", DEFAULT_LIMIT, 1, MAX_LIMIT);
             String requestId = stringParam(context.parameters(), "requestId");
+
+            Optional<ExternalService> external = externalServiceRegistry.findByName(target);
+            if (external.isPresent()) {
+                return executeExternal(external.get(), requestId, limit, context);
+            }
 
             List<ObservabilityClient.ServiceQueryResult> results = context.timeout() == null
                     ? observabilityClient.queryLogs(
@@ -112,6 +127,49 @@ public class QueryLogsTool implements DiagnosticTool {
         } catch (Exception ex) {
             return ToolResult.failure("query_logs 执行失败: " + ex.getMessage());
         }
+    }
+
+    private ToolResult executeExternal(ExternalService service,
+                                       String requestId,
+                                       int limit,
+                                       ToolExecutionContext context) {
+        ExternalActuatorClient.LogSnapshot snapshot =
+                externalActuatorClient.logs(service, requestId, limit);
+        if (!snapshot.available()) {
+            return ToolResult.failure("query_logs 不可用: " + snapshot.message());
+        }
+
+        List<Map<String, Object>> items = new ArrayList<>();
+        List<String> evidenceIds = new ArrayList<>();
+        for (ExternalActuatorClient.LogEntry entry : snapshot.entries()) {
+            Map<String, Object> item = new LinkedHashMap<>(entry.fields());
+            item.put("sourceService", service.getName());
+            items.add(item);
+            evidenceIds.add(entry.evidenceId());
+        }
+
+        Map<String, Object> query = new LinkedHashMap<>();
+        query.put("service", service.getName());
+        query.put("requestId", requestId);
+        query.put("limit", limit);
+
+        Map<String, Object> output = new LinkedHashMap<>();
+        output.put("tool", name());
+        output.put("external", true);
+        output.put("dataSources", List.of("external-log-source"));
+        output.put("query", query);
+        output.put("timeRange", Map.of(
+                "startTime", context.windowStart() != null ? context.windowStart().toString() : "",
+                "endTime", context.windowEnd() != null ? context.windowEnd().toString() : ""));
+        output.put("timeWindowSupported", false);
+        output.put("collectedAt", Instant.now().toString());
+        output.put("evidenceIds", evidenceIds);
+        output.put("itemCount", items.size());
+        output.put("items", items);
+        output.put("warnings", List.of());
+        output.put("dataNote",
+                "日志来自显式配置的只读日志数据源；未配置时工具会明确失败，不会生成替代日志，也不代表没有异常");
+        return ToolResult.success(output);
     }
 
     private int intParam(Map<String, Object> parameters, String key, int defaultValue, int min, int max) {

@@ -3,6 +3,7 @@ package com.microservice.rca.agent;
 import com.microservice.rca.tools.DiagnosticToolRegistry;
 import java.time.Instant;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
@@ -14,7 +15,7 @@ import org.springframework.stereotype.Component;
 @Component
 public class AgentToolCallValidator {
 
-    private static final Set<String> ALLOWED_SERVICES =
+    private static final Set<String> BUILT_IN_SERVICES =
             Set.of("all", "order-service", "inventory-service");
     private static final Pattern REQUEST_ID_PATTERN = Pattern.compile("[A-Za-z0-9._:-]{1,64}");
     private static final Set<String> COMMON_KEYS =
@@ -36,10 +37,19 @@ public class AgentToolCallValidator {
             }
         }
 
-        String service = stringArg(args, "service", "all");
-        if (!ALLOWED_SERVICES.contains(service)) {
+        boolean external = "EXTERNAL".equalsIgnoreCase(input.serviceKind());
+        Set<String> allowedServices = input.allowedServices() == null
+                || input.allowedServices().isEmpty()
+                ? BUILT_IN_SERVICES
+                : Set.copyOf(input.allowedServices());
+        String defaultService = external && input.serviceName() != null
+                ? input.serviceName() : "all";
+
+        String service = stringArg(args, "service", defaultService);
+        if (!allowedServices.contains(service)) {
             throw new AgentValidationException("不支持的服务: " + service
-                    + "，可选值: all/order-service/inventory-service");
+                    + "，可选值: " + String.join("/", input.allowedServices() != null
+                    ? input.allowedServices() : List.copyOf(BUILT_IN_SERVICES)));
         }
         int lookbackMinutes = intArg(args, "lookbackMinutes", 30, 1, 60);
         int limit = 50;
@@ -49,6 +59,14 @@ public class AgentToolCallValidator {
             requestId = stringArg(args, "requestId", null);
             if (requestId != null && !REQUEST_ID_PATTERN.matcher(requestId).matches()) {
                 throw new AgentValidationException("requestId 格式不合法，只允许 1-64 位字母、数字、点、下划线、冒号或连字符");
+            }
+        } else if ("query_health".equals(toolName)) {
+            if (!external) {
+                throw new AgentValidationException("query_health 仅支持外部服务诊断");
+            }
+            if (args.containsKey("lookbackMinutes")) {
+                throw new AgentValidationException(
+                        "query_health 不接受 lookbackMinutes，健康状态是单次快照");
             }
         } else if (!"query_metrics".equals(toolName)) {
             throw new AgentValidationException("该工具不支持 Agent 调用: " + toolName);
@@ -62,7 +80,9 @@ public class AgentToolCallValidator {
         }
 
         Map<String, Object> parameters = new LinkedHashMap<>();
-        parameters.put("lookbackMinutes", lookbackMinutes);
+        if (!"query_health".equals(toolName)) {
+            parameters.put("lookbackMinutes", lookbackMinutes);
+        }
         if ("query_logs".equals(toolName)) {
             parameters.put("limit", limit);
             if (requestId != null) {

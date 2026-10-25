@@ -1,11 +1,15 @@
 package com.microservice.rca.tools;
 
+import com.microservice.rca.external.client.ExternalActuatorClient;
+import com.microservice.rca.external.domain.ExternalService;
+import com.microservice.rca.external.service.ExternalServiceRegistry;
 import com.microservice.rca.observability.ObservabilityClient;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import org.springframework.stereotype.Component;
 
 /**
@@ -15,9 +19,15 @@ import org.springframework.stereotype.Component;
 public class QueryMetricsTool implements DiagnosticTool {
 
     private final ObservabilityClient observabilityClient;
+    private final ExternalServiceRegistry externalServiceRegistry;
+    private final ExternalActuatorClient externalActuatorClient;
 
-    public QueryMetricsTool(ObservabilityClient observabilityClient) {
+    public QueryMetricsTool(ObservabilityClient observabilityClient,
+                            ExternalServiceRegistry externalServiceRegistry,
+                            ExternalActuatorClient externalActuatorClient) {
         this.observabilityClient = observabilityClient;
+        this.externalServiceRegistry = externalServiceRegistry;
+        this.externalActuatorClient = externalActuatorClient;
     }
 
     @Override
@@ -27,7 +37,7 @@ public class QueryMetricsTool implements DiagnosticTool {
 
     @Override
     public String description() {
-        return "按服务、时间窗口查询真实请求量、错误量与响应耗时分钟桶（只读）";
+        return "查询真实指标：内置实验服务返回分钟级请求聚合，已注册外部服务返回 Actuator 只读指标快照";
     }
 
     @Override
@@ -38,6 +48,12 @@ public class QueryMetricsTool implements DiagnosticTool {
         try {
             String target = context.serviceName() == null || context.serviceName().isBlank()
                     ? "all" : context.serviceName();
+
+            Optional<ExternalService> external = externalServiceRegistry.findByName(target);
+            if (external.isPresent()) {
+                return executeExternal(external.get(), context);
+            }
+
             List<ObservabilityClient.ServiceQueryResult> results = context.timeout() == null
                     ? observabilityClient.queryMetrics(
                             target, context.windowStart(), context.windowEnd())
@@ -132,6 +148,58 @@ public class QueryMetricsTool implements DiagnosticTool {
         } catch (Exception ex) {
             return ToolResult.failure("query_metrics 执行失败: " + ex.getMessage());
         }
+    }
+
+    private ToolResult executeExternal(ExternalService service, ToolExecutionContext context) {
+        ExternalActuatorClient.MetricsSnapshot snapshot = externalActuatorClient.metrics(service);
+        if (!snapshot.available()) {
+            return ToolResult.failure("query_metrics 不可用: " + snapshot.message());
+        }
+
+        List<Map<String, Object>> metrics = new ArrayList<>();
+        List<String> evidenceIds = new ArrayList<>();
+        for (ExternalActuatorClient.MetricSample sample : snapshot.metrics()) {
+            List<Map<String, Object>> measurements = sample.measurements().stream()
+                    .map(measurement -> {
+                        Map<String, Object> item = new LinkedHashMap<>();
+                        item.put("statistic", measurement.statistic());
+                        item.put("value", measurement.value());
+                        return item;
+                    })
+                    .toList();
+            Map<String, Object> metric = new LinkedHashMap<>();
+            metric.put("name", sample.name());
+            metric.put("description", sample.description());
+            metric.put("baseUnit", sample.baseUnit());
+            metric.put("measurements", measurements);
+            metrics.add(metric);
+            evidenceIds.add("metric:" + service.getName() + ":" + sample.name());
+        }
+
+        Map<String, Object> query = new LinkedHashMap<>();
+        query.put("service", service.getName());
+
+        Map<String, Object> aggregate = new LinkedHashMap<>();
+        aggregate.put("metricCount", metrics.size());
+
+        Map<String, Object> output = new LinkedHashMap<>();
+        output.put("tool", name());
+        output.put("external", true);
+        output.put("dataSources", List.of("external-actuator-metrics"));
+        output.put("query", query);
+        output.put("timeRange", Map.of(
+                "startTime", context.windowStart() != null ? context.windowStart().toString() : "",
+                "endTime", context.windowEnd() != null ? context.windowEnd().toString() : ""));
+        output.put("timeWindowSupported", false);
+        output.put("collectedAt", Instant.now().toString());
+        output.put("evidenceIds", evidenceIds);
+        output.put("metricCount", metrics.size());
+        output.put("metrics", metrics);
+        output.put("summary", aggregate);
+        output.put("warnings", snapshot.warnings());
+        output.put("dataNote",
+                "Actuator 指标为本次采集快照，不支持任意历史时间窗口；指标缺失不代表未发生异常");
+        return ToolResult.success(output);
     }
 
     @SuppressWarnings("unchecked")

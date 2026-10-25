@@ -71,10 +71,14 @@ public class EvidenceService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "证据查询时间窗口不能超过 24 小时");
         }
 
+        boolean external = "EXTERNAL".equalsIgnoreCase(event.getSource());
         String requestId = request != null && request.requestId() != null && !request.requestId().isBlank()
                 ? request.requestId().trim() : event.getRequestId();
-        String serviceName = request != null && request.serviceName() != null
-                && !request.serviceName().isBlank() ? request.serviceName().trim() : "all";
+        // 外部事件的证据范围固定为事件关联的服务，不能被请求参数改成其他服务。
+        String serviceName = external
+                ? event.getServiceName()
+                : (request != null && request.serviceName() != null
+                        && !request.serviceName().isBlank() ? request.serviceName().trim() : "all");
         int logLimit = request != null && request.logLimit() != null
                 ? Math.max(1, Math.min(request.logLimit(), MAX_LOG_LIMIT)) : DEFAULT_LOG_LIMIT;
 
@@ -82,7 +86,9 @@ public class EvidenceService {
         task.setFaultEventId(eventId);
         task.setStatus(DiagnosisStatus.RUNNING);
         task.setTriggerSource("MANUAL_EVIDENCE");
-        task.setGoal(truncate("采集故障事件 " + eventId + " 的真实日志与指标证据", 512));
+        task.setGoal(external
+                ? truncate("采集外部服务 " + serviceName + " 的真实 Actuator 健康/指标与日志证据", 512)
+                : truncate("采集故障事件 " + eventId + " 的真实日志与指标证据", 512));
         task.setCreatedBy("rca-console");
         task = taskRepository.save(task);
 
@@ -92,22 +98,36 @@ public class EvidenceService {
         parameters.put("serviceName", serviceName);
 
         try {
+            ToolInvocationOutcome health = null;
+            int sequence = 1;
+            if (external) {
+                health = toolInvocationService.invoke(
+                        task.getId(),
+                        "query_health",
+                        new ToolExecutionContext(task.getId(), serviceName, windowStart, windowEnd,
+                                Map.of(), MANUAL_TOOL_TIMEOUT),
+                        sequence++);
+            }
             ToolInvocationOutcome logs = toolInvocationService.invoke(
                     task.getId(),
                     "query_logs",
                     new ToolExecutionContext(task.getId(), serviceName, windowStart, windowEnd,
                             parameters, MANUAL_TOOL_TIMEOUT),
-                    1);
+                    sequence++);
             ToolInvocationOutcome metrics = toolInvocationService.invoke(
                     task.getId(),
                     "query_metrics",
                     new ToolExecutionContext(task.getId(), serviceName, windowStart, windowEnd,
                             parameters, MANUAL_TOOL_TIMEOUT),
-                    2);
+                    sequence);
 
-            boolean anySuccess = logs.result().success() || metrics.result().success();
+            boolean anySuccess = logs.result().success() || metrics.result().success()
+                    || (health != null && health.result().success());
             Instant collectedAt = Instant.now();
             List<EvidenceCollectionView.ToolEvidenceView> toolViews = new ArrayList<>();
+            if (health != null) {
+                toolViews.add(toToolView(health));
+            }
             toolViews.add(toToolView(logs));
             toolViews.add(toToolView(metrics));
 
@@ -117,11 +137,14 @@ public class EvidenceService {
             evidence.put("collectedAt", collectedAt.toString());
             evidence.put("windowStart", windowStart.toString());
             evidence.put("windowEnd", windowEnd.toString());
+            evidence.put("timeWindowSupported", !external);
             evidence.put("requestId", requestId);
             evidence.put("serviceName", serviceName);
             evidence.put("logLimit", logLimit);
             evidence.put("tools", toolViews.stream().map(this::toEvidenceTool).toList());
-            evidence.put("note", "工具输出为真实观测数据快照；采集失败的工具已记录错误，未使用模拟数据");
+            evidence.put("note", external
+                    ? "外部服务证据仅来自 Actuator 健康/指标快照和显式配置的日志数据源；采集失败的工具已记录错误，未使用模拟数据"
+                    : "工具输出为真实观测数据快照；采集失败的工具已记录错误，未使用模拟数据");
 
             // 先写证据，再落任务终态：避免出现 SUCCEEDED 但事件没有证据快照。
             faultEventService.saveEvidence(eventId, jsonSupport.write(evidence), collectedAt);
@@ -140,7 +163,10 @@ public class EvidenceService {
                     windowEnd,
                     requestId,
                     toolViews,
-                    "证据来自 order-service / inventory-service 的真实观测接口；工具调用已写入 tool_invocation 审计表");
+                    external
+                            ? "证据来自外部服务 " + serviceName
+                                    + " 的只读 Actuator 快照与显式日志数据源；工具调用已写入 tool_invocation 审计表"
+                            : "证据来自 order-service / inventory-service 的真实观测接口；工具调用已写入 tool_invocation 审计表");
         } catch (RuntimeException ex) {
             String reason = "证据采集失败: " + ex.getClass().getSimpleName()
                     + (ex.getMessage() != null ? " - " + ex.getMessage() : "");

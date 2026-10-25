@@ -8,12 +8,17 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.microservice.rca.external.client.ExternalActuatorClient;
+import com.microservice.rca.external.domain.ExternalService;
+import com.microservice.rca.external.service.ExternalServiceRegistry;
 import com.microservice.rca.observability.ObservabilityClient;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class QueryLogsToolTest {
@@ -22,7 +27,14 @@ class QueryLogsToolTest {
     private static final Instant END = Instant.parse("2026-10-20T17:18:00Z");
 
     private final ObservabilityClient client = mock(ObservabilityClient.class);
-    private final QueryLogsTool tool = new QueryLogsTool(client);
+    private final ExternalServiceRegistry externalRegistry = mock(ExternalServiceRegistry.class);
+    private final ExternalActuatorClient externalClient = mock(ExternalActuatorClient.class);
+    private final QueryLogsTool tool = new QueryLogsTool(client, externalRegistry, externalClient);
+
+    @BeforeEach
+    void noExternalServiceByDefault() {
+        when(externalRegistry.findByName(anyString())).thenReturn(Optional.empty());
+    }
 
     @Test
     void mergesLogsAndExposesEvidenceSource() {
@@ -104,12 +116,64 @@ class QueryLogsToolTest {
     }
 
     @Test
+    void dispatchesRegisteredExternalServiceToConfiguredLogSource() {
+        ExternalService service = externalService("petclinic");
+        when(externalRegistry.findByName("petclinic")).thenReturn(Optional.of(service));
+        when(externalClient.logs(service, "req-1", 20)).thenReturn(
+                new ExternalActuatorClient.LogSnapshot(true,
+                        List.of(new ExternalActuatorClient.LogEntry(
+                                "log:petclinic:1", Map.of("message", "request timeout"))),
+                        "ok", Instant.now()));
+
+        ToolResult result = tool.execute(new ToolExecutionContext(
+                UUID.randomUUID(), "petclinic", START, END,
+                Map.of("requestId", "req-1", "limit", 20)));
+
+        assertThat(result.success()).isTrue();
+        assertThat(result.output().get("external")).isEqualTo(true);
+        assertThat(result.output().get("timeWindowSupported")).isEqualTo(false);
+        assertThat(result.output().get("evidenceIds")).asList()
+                .containsExactly("log:petclinic:1");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> items = (List<Map<String, Object>>) result.output().get("items");
+        assertThat(items).singleElement()
+                .satisfies(item -> assertThat(item.get("sourceService")).isEqualTo("petclinic"));
+    }
+
+    @Test
+    void externalLogSourceUnavailableIsExplicitFailure() {
+        ExternalService service = externalService("petclinic");
+        when(externalRegistry.findByName("petclinic")).thenReturn(Optional.of(service));
+        when(externalClient.logs(service, null, 50)).thenReturn(
+                ExternalActuatorClient.LogSnapshot.unavailable(
+                        "外部服务未配置日志数据源", Instant.now()));
+
+        ToolResult result = tool.execute(new ToolExecutionContext(
+                UUID.randomUUID(), "petclinic", START, END, Map.of()));
+
+        assertThat(result.success()).isFalse();
+        assertThat(result.errorMessage()).contains("不可用").contains("未配置日志数据源");
+    }
+
+    @Test
     void rejectsMissingTimeWindow() {
         ToolResult result = tool.execute(new ToolExecutionContext(
                 UUID.randomUUID(), "all", null, null, Map.of()));
 
         assertThat(result.success()).isFalse();
         assertThat(result.errorMessage()).contains("缺少时间窗口");
+    }
+
+    private ExternalService externalService(String name) {
+        ExternalService service = new ExternalService();
+        service.setId(UUID.randomUUID());
+        service.setName(name);
+        service.setBaseUrl("http://localhost:8083");
+        service.setHealthPath("/actuator/health");
+        service.setMetricsPath("/actuator/metrics");
+        service.setLogSourceUrl("http://localhost:8083/logs");
+        service.setEnabled(true);
+        return service;
     }
 
     private ToolExecutionContext context(Map<String, Object> parameters) {

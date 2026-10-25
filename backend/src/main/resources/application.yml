@@ -44,14 +44,37 @@ experiment:
   # 订单结算成功但耗时超过该阈值时，记录为慢响应观测事件
   slow-response-threshold-ms: ${EXPERIMENT_SLOW_RESPONSE_THRESHOLD_MS:3000}
 
+rca:
+  remediation:
+    # 受控处置默认关闭；打开后仍需 confirmed=true、白名单动作和事件状态校验
+    enabled: ${RCA_REMEDIATION_ENABLED:false}
+    recovery:
+      # 启动恢复只支持单后端实例；多实例共享同一数据库时必须关闭，避免误判存活任务
+      enabled: ${RCA_REMEDIATION_RECOVERY_ENABLED:true}
+  external-services:
+    # 外部服务只读接入：默认仅允许本机回环地址，显式授权其他主机时必须填写字面 IP
+    allowed-hosts: ${EXTERNAL_SERVICE_ALLOWED_HOSTS:localhost,127.0.0.1,::1}
+    allowed-ports: ${EXTERNAL_SERVICE_ALLOWED_PORTS:80,443,8080,8081,8082,8083,8084,8085,9090}
+    connect-timeout-ms: ${EXTERNAL_SERVICE_CONNECT_TIMEOUT_MS:2000}
+    read-timeout-ms: ${EXTERNAL_SERVICE_READ_TIMEOUT_MS:5000}
+    max-response-bytes: ${EXTERNAL_SERVICE_MAX_RESPONSE_BYTES:262144}
+    default-health-path: ${EXTERNAL_SERVICE_HEALTH_PATH:/actuator/health}
+    default-metrics-path: ${EXTERNAL_SERVICE_METRICS_PATH:/actuator/metrics}
+    # 日志数据源默认必须与基地址同源，避免日志地址成为新的 SSRF 入口
+    log-source-same-origin-only: ${EXTERNAL_SERVICE_LOG_SAME_ORIGIN_ONLY:true}
+
 # LLM Agent：API Key 只从环境变量读取，禁止写入仓库
 agent:
+  # 模型调用总开关：默认关闭。关闭时不发起任何模型 HTTP 请求，
+  # 即使 .env 中配置了真实 Key 也不会绕过。
+  llm-enabled: ${RCA_LLM_ENABLED:false}
   deepseek:
     api-key: ${DEEPSEEK_API_KEY:}
     base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
     model: ${DEEPSEEK_MODEL:deepseek-flash}
     temperature: ${DEEPSEEK_TEMPERATURE:0.1}
-    max-tokens: ${DEEPSEEK_MAX_TOKENS:1200}
+    # 1200 对包含根因、假设、证据与限制数组的 JSON 报告偏紧；适度提高以降低 finish_reason=length 概率。
+    max-tokens: ${DEEPSEEK_MAX_TOKENS:1600}
     connect-timeout-ms: ${DEEPSEEK_CONNECT_TIMEOUT_MS:5000}
     read-timeout-ms: ${DEEPSEEK_READ_TIMEOUT_MS:60000}
   limits:

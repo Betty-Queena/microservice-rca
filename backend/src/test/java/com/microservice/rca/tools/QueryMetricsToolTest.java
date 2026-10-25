@@ -7,12 +7,17 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.microservice.rca.external.client.ExternalActuatorClient;
+import com.microservice.rca.external.domain.ExternalService;
+import com.microservice.rca.external.service.ExternalServiceRegistry;
 import com.microservice.rca.observability.ObservabilityClient;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class QueryMetricsToolTest {
@@ -21,7 +26,14 @@ class QueryMetricsToolTest {
     private static final Instant END = Instant.parse("2026-10-20T17:18:00Z");
 
     private final ObservabilityClient client = mock(ObservabilityClient.class);
-    private final QueryMetricsTool tool = new QueryMetricsTool(client);
+    private final ExternalServiceRegistry externalRegistry = mock(ExternalServiceRegistry.class);
+    private final ExternalActuatorClient externalClient = mock(ExternalActuatorClient.class);
+    private final QueryMetricsTool tool = new QueryMetricsTool(client, externalRegistry, externalClient);
+
+    @BeforeEach
+    void noExternalServiceByDefault() {
+        when(externalRegistry.findByName(anyString())).thenReturn(Optional.empty());
+    }
 
     @Test
     void aggregatesRealBucketsAcrossServices() {
@@ -84,6 +96,54 @@ class QueryMetricsToolTest {
 
         assertThat(result.success()).isTrue();
         verify(client).queryMetrics("all", START, END, timeout);
+    }
+
+    @Test
+    void externalServiceReturnsActuatorSnapshotWithoutFakeBuckets() {
+        ExternalService service = externalService("petclinic");
+        when(externalRegistry.findByName("petclinic")).thenReturn(Optional.of(service));
+        when(externalClient.metrics(service)).thenReturn(
+                new ExternalActuatorClient.MetricsSnapshot(true,
+                        List.of(new ExternalActuatorClient.MetricSample(
+                                "jvm.memory.used", "memory", "bytes",
+                                List.of(new ExternalActuatorClient.Measurement("VALUE", 1024.0)))),
+                        "snapshot", Instant.now(), List.of()));
+
+        ToolResult result = tool.execute(new ToolExecutionContext(
+                UUID.randomUUID(), "petclinic", START, END, Map.of()));
+
+        assertThat(result.success()).isTrue();
+        assertThat(result.output().get("external")).isEqualTo(true);
+        assertThat(result.output().get("timeWindowSupported")).isEqualTo(false);
+        assertThat(result.output().get("evidenceIds")).asList()
+                .containsExactly("metric:petclinic:jvm.memory.used");
+        assertThat(result.output()).doesNotContainKey("services");
+    }
+
+    @Test
+    void externalMetricsUnavailableIsExplicitFailure() {
+        ExternalService service = externalService("petclinic");
+        when(externalRegistry.findByName("petclinic")).thenReturn(Optional.of(service));
+        when(externalClient.metrics(service)).thenReturn(
+                ExternalActuatorClient.MetricsSnapshot.unavailable(
+                        "指标端点未暴露", Instant.now()));
+
+        ToolResult result = tool.execute(new ToolExecutionContext(
+                UUID.randomUUID(), "petclinic", START, END, Map.of()));
+
+        assertThat(result.success()).isFalse();
+        assertThat(result.errorMessage()).contains("不可用").contains("指标端点未暴露");
+    }
+
+    private ExternalService externalService(String name) {
+        ExternalService service = new ExternalService();
+        service.setId(UUID.randomUUID());
+        service.setName(name);
+        service.setBaseUrl("http://localhost:8083");
+        service.setHealthPath("/actuator/health");
+        service.setMetricsPath("/actuator/metrics");
+        service.setEnabled(true);
+        return service;
     }
 
     private Map<String, Object> serviceData(String source,

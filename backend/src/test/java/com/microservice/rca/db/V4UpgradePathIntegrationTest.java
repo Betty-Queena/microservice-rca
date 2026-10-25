@@ -3,6 +3,7 @@ package com.microservice.rca.db;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.microservice.rca.agent.DiagnosisTaskRecovery;
+import com.microservice.rca.testsupport.TestDatabaseGuard;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -14,6 +15,7 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.ContextConfiguration;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 /**
@@ -26,8 +28,13 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
         webEnvironment = SpringBootTest.WebEnvironment.NONE,
         properties = {
                 "spring.flyway.target=3",
-                "spring.jpa.hibernate.ddl-auto=none"
+                "spring.jpa.hibernate.ddl-auto=none",
+                // V3 库还没有 remediation_action 表，关闭启动恢复避免无意义查询失败日志。
+                "rca.remediation.recovery.enabled=false",
+                // 升级测试必须使用全新库；该约束在 Flyway 启动之前生效。
+                "rca.test.expected-database=rca_v4_upgrade"
         })
+@ContextConfiguration(initializers = TestDatabaseGuard.class)
 @EnabledIfEnvironmentVariable(named = "RCA_V4_UPGRADE", matches = "true")
 class V4UpgradePathIntegrationTest {
 
@@ -76,6 +83,8 @@ class V4UpgradePathIntegrationTest {
         Flyway.configure()
                 .dataSource(dataSource)
                 .locations("classpath:db/migration")
+                // 只验证 V3 -> V4；V5/V6 的升级路径由独立测试覆盖，避免断言随迁移版本漂移。
+                .target("4")
                 .load()
                 .migrate();
 

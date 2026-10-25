@@ -128,10 +128,24 @@ public class AgentTaskRunner {
             case INSUFFICIENT_EVIDENCE -> {
                 task.setStatus(DiagnosisStatus.SUCCEEDED);
                 task.setResultStatus(DiagnosisResultStatus.INSUFFICIENT_EVIDENCE);
-                task.setConfidenceLevel(null);
-                task.setRootCause(null);
-                task.setConclusion(truncate("证据不足："
-                        + result.report().getOrDefault("reason", "未形成可验证根因"), 2048));
+                boolean lowConfidenceHypothesis = "LOW_CONFIDENCE_HYPOTHESIS".equals(
+                        String.valueOf(result.report().get("assessment")));
+                if (lowConfidenceHypothesis) {
+                    // 任务执行成功，但只有低置信度假说；不写入 root_cause，避免前端把它当作已定位根因。
+                    task.setConfidenceLevel(result.confidenceLevel() != null
+                            ? result.confidenceLevel() : "LOW");
+                    task.setRootCause(null);
+                    String hypothesis = firstNonBlank(
+                            result.report().get("hypothesis"),
+                            result.report().get("rootCause"),
+                            result.report().get("reason"));
+                    task.setConclusion(truncate("低置信度假说（未定位根因）：" + hypothesis, 2048));
+                } else {
+                    task.setConfidenceLevel(null);
+                    task.setRootCause(null);
+                    task.setConclusion(truncate("证据不足："
+                            + result.report().getOrDefault("reason", "未形成可验证根因"), 2048));
+                }
                 task.setReport(jsonSupport.write(withRunStats(result.report(), stats)));
                 task.setFailureReason(null);
             }
@@ -339,6 +353,15 @@ public class AgentTaskRunner {
         } catch (Exception ex) {
             return "unknown";
         }
+    }
+
+    private String firstNonBlank(Object... values) {
+        for (Object value : values) {
+            if (value != null && !String.valueOf(value).isBlank()) {
+                return String.valueOf(value);
+            }
+        }
+        return "未形成可验证根因";
     }
 
     private String truncate(String value, int maxLength) {

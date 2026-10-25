@@ -12,6 +12,14 @@ public interface AgentModelClient {
 
     boolean isConfigured();
 
+    /**
+     * 不可用原因。实现方可以区分“未配置 Key”和“总开关关闭”，
+     * 调用方直接展示该原因，避免把禁用误报成 Key 缺失。
+     */
+    default String unavailabilityReason() {
+        return "未配置 DEEPSEEK_API_KEY，Agent 未调用模型，也未生成任何诊断结论";
+    }
+
     ModelResponse complete(ModelRequest request);
 
     /**
@@ -31,10 +39,23 @@ public interface AgentModelClient {
             String model,
             int promptTokens,
             int completionTokens,
-            boolean usageAvailable) {
+            boolean usageAvailable,
+            String finishReason) {
+
+        public ModelResponse(String content,
+                             String model,
+                             int promptTokens,
+                             int completionTokens,
+                             boolean usageAvailable) {
+            this(content, model, promptTokens, completionTokens, usageAvailable, null);
+        }
 
         public int totalTokens() {
             return promptTokens + completionTokens;
+        }
+
+        public boolean lengthTruncated() {
+            return "length".equalsIgnoreCase(finishReason);
         }
     }
 }

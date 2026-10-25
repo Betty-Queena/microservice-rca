@@ -71,8 +71,24 @@ public class ExperimentService {
         return toStatusView(inventoryPost("/api/experiments/faults/enable", payload));
     }
 
+    /**
+     * 兼容旧调用的无条件关闭。Day 7 runner 和现有前端仍使用该路径。
+     */
     public ExperimentFaultStatusView disable() {
         return toStatusView(inventoryPost("/api/experiments/faults/disable", null));
+    }
+
+    /**
+     * 条件关闭指定实验对应的故障。expectedExperimentId 由调用方从故障事件读取，
+     * 不来自任意请求参数；库存服务会在 ID 不匹配时返回 409。
+     */
+    public ExperimentFaultStatusView disable(UUID expectedExperimentId) {
+        Map<String, Object> payload = null;
+        if (expectedExperimentId != null) {
+            payload = new LinkedHashMap<>();
+            payload.put("expectedExperimentId", expectedExperimentId);
+        }
+        return toStatusView(inventoryPost("/api/experiments/faults/disable", payload));
     }
 
     public ExperimentFaultStatusView reset() {

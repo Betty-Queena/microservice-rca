@@ -58,7 +58,7 @@ public class AgentDiagnosisService {
     public AgentTaskDetailView startForEvent(UUID eventId) {
         FaultEvent event = faultEventService.requireEvent(eventId);
         ensureNoActiveAgentTask(eventId);
-        DiagnosisTask task = createTask(eventId, "AGENT");
+        DiagnosisTask task = createTask(event, "AGENT");
         markEventDiagnosing(event);
         submit(task, event);
         return detail(task.getId());
@@ -73,7 +73,7 @@ public class AgentDiagnosisService {
         FaultEvent event = faultEventService.requireEvent(original.getFaultEventId());
         ensureNoActiveAgentTask(original.getFaultEventId());
         // 重试创建新任务，原任务的成功/失败记录保持不变，便于审计历史。
-        DiagnosisTask retry = createTask(original.getFaultEventId(), "AGENT_RETRY");
+        DiagnosisTask retry = createTask(event, "AGENT_RETRY");
         markEventDiagnosing(event);
         submit(retry, event);
         return detail(retry.getId());
@@ -187,12 +187,12 @@ public class AgentDiagnosisService {
                 .toList();
     }
 
-    private DiagnosisTask createTask(UUID eventId, String triggerSource) {
+    private DiagnosisTask createTask(FaultEvent event, String triggerSource) {
         DiagnosisTask task = new DiagnosisTask();
-        task.setFaultEventId(eventId);
+        task.setFaultEventId(event.getId());
         task.setStatus(DiagnosisStatus.PENDING);
         task.setTriggerSource(triggerSource);
-        task.setGoal("由 LLM Agent 基于真实日志与指标证据自主调查故障事件 " + eventId);
+        task.setGoal(buildGoal(event));
         task.setCreatedBy("rca-console");
         try {
             return taskRepository.save(task);
@@ -201,6 +201,18 @@ public class AgentDiagnosisService {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "该事件已有诊断任务正在执行，请等待完成或查询现有任务");
         }
+    }
+
+    /**
+     * 外部诊断的目标明确说明证据范围，避免模型把实验预设或未采集的数据当作证据。
+     */
+    private String buildGoal(FaultEvent event) {
+        if ("EXTERNAL".equalsIgnoreCase(event.getSource())) {
+            return "由 LLM Agent 基于外部服务 " + event.getServiceName()
+                    + " 的真实 Actuator 健康/指标与显式配置的日志证据自主调查故障事件 "
+                    + event.getId();
+        }
+        return "由 LLM Agent 基于真实日志与指标证据自主调查故障事件 " + event.getId();
     }
 
     private DiagnosisTask requireTask(UUID taskId) {

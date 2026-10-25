@@ -62,15 +62,17 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         Set<String> knownEvidenceIds = new LinkedHashSet<>();
         Set<String> executedSignatures = new LinkedHashSet<>();
         String feedback = null;
+        boolean lengthTruncationRetried = false;
         int modelCalls = 0;
         int toolCalls = 0;
         Instant deadline = Instant.now().plus(input.limits().overallTimeout());
         String modelName = modelClient.modelName();
 
         if (!modelClient.isConfigured()) {
-            String reason = "未配置 DEEPSEEK_API_KEY，Agent 未调用模型，也未生成任何诊断结论";
+            String reason = modelClient.unavailabilityReason();
+            String errorType = properties.llmEnabled() ? "CONFIG_MISSING" : "LLM_DISABLED";
             trace.add(modelErrorTrace(0,
-                    new AgentModelException("CONFIG_MISSING", reason, false),
+                    new AgentModelException(errorType, reason, false),
                     0, 0, modelName));
             return AgentRunResult.failed(reason, trace, modelName);
         }
@@ -92,7 +94,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             long modelStartedAt = System.nanoTime();
             try {
                 response = modelClient.complete(new AgentModelClient.ModelRequest(
-                        promptBuilder.systemPrompt(),
+                        promptBuilder.systemPrompt(input),
                         userPrompt,
                         properties.deepseek().temperature(),
                         properties.deepseek().maxTokens(),
@@ -135,6 +137,22 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             } catch (AgentValidationException ex) {
                 trace.add(modelDecisionTrace(modelCalls, "INVALID_OUTPUT", latencyMs,
                         userPrompt.length(), response, modelName, ex.getMessage(), null));
+                if (response.lengthTruncated()) {
+                    // finish_reason=length 说明输出被 max_tokens 截断，盲目原样重试只会重复消耗 Token。
+                    // 只允许一次带明确指令的重试；仍截断或已无剩余轮数时终止并留下可审计原因。
+                    if (lengthTruncationRetried
+                            || modelCalls >= input.limits().maxModelCalls()) {
+                        return AgentRunResult.failed(
+                                "模型输出因长度截断（finish_reason=length），"
+                                        + "未能在剩余模型调用轮数内形成完整有效决策",
+                                trace, modelName);
+                    }
+                    lengthTruncationRetried = true;
+                    feedback = "上一轮模型输出因 max_tokens 截断（finish_reason=length），"
+                            + "JSON 不完整。请重新输出一个更精简、完整且符合约定的单个 JSON 对象，"
+                            + "不要重复无关内容或思维链。";
+                    continue;
+                }
                 feedback = "模型输出校验失败: " + ex.getMessage()
                         + "。请只输出符合约定的单个 JSON 对象。";
                 continue;
@@ -224,20 +242,50 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                             userPrompt.length(), response, modelName,
                             "尚无真实证据，拒绝根因报告", finalReport.reason()));
                     feedback = "当前没有任何成功的工具证据，不能输出根因报告。"
-                            + "请先调用 query_logs 或 query_metrics，或输出 INSUFFICIENT_EVIDENCE。";
+                            + "请先调用已注册的只读工具（"
+                            + input.availableTools().stream()
+                                    .map(tool -> tool.name())
+                                    .reduce((left, right) -> left + "/" + right)
+                                    .orElse("无")
+                            + "），或输出 INSUFFICIENT_EVIDENCE。";
                     continue;
                 }
                 try {
                     AgentReportValidator.ValidatedReport validated =
-                            reportValidator.validate(finalReport.report(), knownEvidenceIds);
+                            reportValidator.validate(finalReport.report(), knownEvidenceIds,
+                                    input.allowedServices());
                     Map<String, Object> report = new LinkedHashMap<>(validated.report());
-                    report.put("result", RunStatus.ROOT_CAUSE_IDENTIFIED.name());
+                    boolean external = "EXTERNAL".equalsIgnoreCase(input.serviceKind());
+                    boolean componentEvidenceAvailable = hasComponentEvidence(observations);
+                    boolean hypothesisOnly = external
+                            && "LOW".equalsIgnoreCase(validated.confidenceLevel())
+                            && !componentEvidenceAvailable;
+                    if (external) {
+                        report.put("componentEvidenceAvailable", componentEvidenceAvailable);
+                        report.put("assessment", hypothesisOnly
+                                ? "LOW_CONFIDENCE_HYPOTHESIS" : "ROOT_CAUSE_IDENTIFIED");
+                    }
+                    if (hypothesisOnly) {
+                        // 低置信度且没有组件级证据时，保留模型假设供人工复核，但不把它当作已定位根因。
+                        report.put("result", RunStatus.INSUFFICIENT_EVIDENCE.name());
+                        report.put("assessmentNote",
+                                "置信度为 LOW 且未获得组件级证据，该内容仅为可验证假设，未定位根因");
+                    } else {
+                        report.put("result", RunStatus.ROOT_CAUSE_IDENTIFIED.name());
+                    }
                     report.put("model", modelName);
                     report.put("modelCallCount", modelCalls);
                     report.put("toolCallCount", toolCalls);
                     report.put("generatedAt", Instant.now().toString());
-                    trace.add(modelDecisionTrace(modelCalls, "FINAL_REPORT_ACCEPTED", latencyMs,
-                            userPrompt.length(), response, modelName, null, finalReport.reason()));
+                    Map<String, Object> finalTrace = modelDecisionTrace(modelCalls,
+                            "FINAL_REPORT_ACCEPTED", latencyMs, userPrompt.length(),
+                            response, modelName, null, finalReport.reason());
+                    finalTrace.put("componentEvidenceAvailable", componentEvidenceAvailable);
+                    finalTrace.put("assessment", report.get("assessment"));
+                    trace.add(finalTrace);
+                    if (hypothesisOnly) {
+                        return AgentRunResult.lowConfidenceHypothesis(report, trace, modelName);
+                    }
                     return AgentRunResult.rootCause(report, trace, modelName, validated.confidenceLevel());
                 } catch (AgentValidationException ex) {
                     trace.add(modelDecisionTrace(modelCalls, "FINAL_REPORT_REJECTED", latencyMs,
@@ -267,6 +315,35 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
 
         return AgentRunResult.failed("达到最大模型调用轮数（"
                 + input.limits().maxModelCalls() + "）仍未形成可验证结论", trace, modelName);
+    }
+
+    /**
+     * 组件级证据包括健康快照的组件明细/组件证据 ID，以及连接池等组件指标。
+     * 它们比整体 UP/DOWN 或通用 JVM 指标更接近具体故障组件。
+     */
+    private boolean hasComponentEvidence(List<Observation> observations) {
+        for (Observation observation : observations) {
+            if (!observation.success() || observation.output() == null) {
+                continue;
+            }
+            if ("query_health".equals(observation.toolName())
+                    && (nonEmptyList(observation.output().get("componentEvidenceIds"))
+                    || nonEmptyList(observation.output().get("components")))) {
+                return true;
+            }
+            if ("query_metrics".equals(observation.toolName())) {
+                for (String evidenceId : observation.evidenceIds()) {
+                    if (evidenceId.contains(":hikaricp.") || evidenceId.contains(":jdbc.")) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean nonEmptyList(Object value) {
+        return value instanceof List<?> list && !list.isEmpty();
     }
 
     private List<String> extractEvidenceIds(Map<String, Object> output) {
@@ -301,6 +378,8 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         entry.put("latencyMs", latencyMs);
         entry.put("promptChars", promptChars);
         entry.put("responseChars", response.content() != null ? response.content().length() : 0);
+        entry.put("finishReason", response.finishReason());
+        entry.put("lengthTruncated", response.lengthTruncated());
         putUsage(entry, response);
         entry.put("reason", truncate(reason, MAX_REASON_LENGTH));
         entry.put("validationError", truncate(validationError, MAX_ERROR_LENGTH));
@@ -316,8 +395,9 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         entry.put("status", "FAILED");
         entry.put("decision", "MODEL_ERROR");
         entry.put("model", modelName);
-        // CONFIG_MISSING 表示根本没有发起模型请求，不能计入模型调用次数。
-        entry.put("modelCallAttempted", !"CONFIG_MISSING".equals(ex.getFailureType()));
+        // round=0 是调用前的配置/开关预检（CONFIG_MISSING、LLM_DISABLED），根本没有发起模型请求，
+        // 不能计入模型调用次数；进入循环后的失败才代表真实发起过调用。
+        entry.put("modelCallAttempted", round > 0);
         entry.put("latencyMs", latencyMs);
         entry.put("promptChars", promptChars);
         entry.put("errorType", ex.getFailureType());

@@ -26,9 +26,11 @@ public class DeepSeekAgentModelClient implements AgentModelClient {
     private final RestClient.Builder builder;
     private final RestClient defaultClient;
     private final AgentProperties.DeepSeek properties;
+    private final boolean llmEnabled;
 
     public DeepSeekAgentModelClient(RestClient.Builder builder, AgentProperties properties) {
         this.properties = properties.deepseek();
+        this.llmEnabled = properties.llmEnabled();
         this.builder = builder.clone();
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
         requestFactory.setConnectTimeout(properties.deepseek().connectTimeoutMs());
@@ -46,12 +48,24 @@ public class DeepSeekAgentModelClient implements AgentModelClient {
 
     @Override
     public boolean isConfigured() {
-        return properties.configured();
+        return llmEnabled && properties.configured();
+    }
+
+    @Override
+    public String unavailabilityReason() {
+        if (!llmEnabled) {
+            return "LLM 调用总开关已关闭（RCA_LLM_ENABLED=false），Agent 未调用模型，也未生成任何诊断结论";
+        }
+        return "未配置 DEEPSEEK_API_KEY，Agent 未调用模型，也未生成任何诊断结论";
     }
 
     @Override
     public ModelResponse complete(ModelRequest request) {
-        if (!isConfigured()) {
+        // 总开关优先于 Key 检查：即使 .env 中存在真实 Key，关闭时也绝不发起 HTTP 请求。
+        if (!llmEnabled) {
+            throw new AgentModelException("LLM_DISABLED", unavailabilityReason(), false);
+        }
+        if (!properties.configured()) {
             throw new AgentModelException("CONFIG_MISSING",
                     "未配置 DEEPSEEK_API_KEY，无法调用真实模型", false);
         }
@@ -130,12 +144,14 @@ public class DeepSeekAgentModelClient implements AgentModelClient {
         JsonNode usage = response.path("usage");
         boolean usageAvailable = usage.isObject()
                 && usage.has("prompt_tokens") && usage.has("completion_tokens");
+        JsonNode finishReason = choices.get(0).path("finish_reason");
         return new ModelResponse(
                 content.asText(),
                 response.path("model").asText(properties.model()),
                 usage.path("prompt_tokens").asInt(0),
                 usage.path("completion_tokens").asInt(0),
-                usageAvailable);
+                usageAvailable,
+                finishReason.isTextual() ? truncate(finishReason.asText(), 32) : null);
     }
 
     private AgentModelException mapHttpError(RestClientResponseException ex) {
@@ -169,11 +185,15 @@ public class DeepSeekAgentModelClient implements AgentModelClient {
     }
 
     private String truncate(String value) {
+        return truncate(value, MAX_ERROR_BODY_LENGTH);
+    }
+
+    private String truncate(String value, int maxLength) {
         if (value == null) {
             return "";
         }
         String compact = value.replaceAll("\\s+", " ").trim();
-        return compact.length() <= MAX_ERROR_BODY_LENGTH
-                ? compact : compact.substring(0, MAX_ERROR_BODY_LENGTH);
+        return compact.length() <= maxLength
+                ? compact : compact.substring(0, maxLength);
     }
 }

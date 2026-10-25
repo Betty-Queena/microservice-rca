@@ -38,10 +38,19 @@ public class FaultInjectionController {
         return ApiResponse.ok(faultInjectionService.enable(body));
     }
 
+    /**
+     * 关闭故障注入。请求体可选：提供 expectedExperimentId 时执行条件关闭，
+     * 不提供时保持原有无条件关闭行为。
+     */
     @PostMapping("/disable")
-    public ApiResponse<FaultInjectionStatus> disable(HttpServletRequest request) {
+    public ApiResponse<FaultInjectionStatus> disable(
+            @RequestBody(required = false) DisableFaultRequest body,
+            HttpServletRequest request) {
         accessGuard.ensureAllowed(request, false);
-        return ApiResponse.ok(faultInjectionService.disable());
+        if (body == null || body.expectedExperimentId() == null) {
+            return ApiResponse.ok(faultInjectionService.disable());
+        }
+        return ApiResponse.ok(faultInjectionService.disable(body.expectedExperimentId()));
     }
 
     @PostMapping("/reset")

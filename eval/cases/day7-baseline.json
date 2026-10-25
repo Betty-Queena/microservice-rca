@@ -1,0 +1,126 @@
+{
+  "suiteId": "day7-baseline",
+  "labelVersion": "2026-10-24.1",
+  "labelSource": "故障注入配置 + ObservationClassifier 的确定性预期结果；未使用模型输出作为标签",
+  "defaults": {
+    "repeat": 3,
+    "cooldownSeconds": 5,
+    "waitAfterExecutionMs": 2000,
+    "faultDurationSeconds": 120,
+    "sku": "SKU-1001",
+    "quantity": 1,
+    "diagnosisTimeoutSeconds": 240
+  },
+  "environmentRequirements": {
+    "faultInjectionEnabled": true,
+    "orderReadTimeoutMs": 5000,
+    "inventoryMaxDelayMs": 4500,
+    "backendSlowResponseThresholdMs": 3000,
+    "note": "P0 默认配置：DELAY 3500ms 返回 200 并归类为 SLOW_RESPONSE；默认配置不会产生 DOWNSTREAM_TIMEOUT"
+  },
+  "cases": [
+    {
+      "caseId": "http500-baseline",
+      "scenario": "HTTP_500",
+      "diagnosis": true,
+      "injection": {
+        "faultType": "HTTP_500"
+      },
+      "expected": {
+        "faultObserved": true,
+        "outcome": "DOWNSTREAM_HTTP_5XX",
+        "httpStatus": 502,
+        "eventExpected": true,
+        "rootCauseService": "inventory-service",
+        "faultCategory": "HTTP_500"
+      },
+      "judge": {
+        "serviceAliases": [
+          "inventory-service",
+          "库存服务"
+        ],
+        "categoryKeywords": [
+          "HTTP 500",
+          "HTTP_500",
+          "500",
+          "5xx",
+          "内部错误",
+          "服务器错误"
+        ],
+        "riskKeywords": [
+          "连接拒绝",
+          "DNS",
+          "超时"
+        ],
+        "evidenceMatchers": [
+          "log:inventory-service:*",
+          "log:order-service:*",
+          "metric:inventory-service:*",
+          "metric:order-service:*"
+        ],
+        "minEvidenceMatchers": 1
+      },
+      "notes": "inventory-service 注入 HTTP 500，order-service 预期返回 502；观察分类预期 DOWNSTREAM_HTTP_5XX。"
+    },
+    {
+      "caseId": "delay-slow-3500",
+      "scenario": "DELAY",
+      "diagnosis": true,
+      "injection": {
+        "faultType": "DELAY",
+        "delayMs": 3500
+      },
+      "expected": {
+        "faultObserved": true,
+        "outcome": "SLOW_RESPONSE",
+        "httpStatus": 200,
+        "minDurationMs": 3000,
+        "eventExpected": true,
+        "rootCauseService": "inventory-service",
+        "faultCategory": "DELAY_SLOW"
+      },
+      "judge": {
+        "serviceAliases": [
+          "inventory-service",
+          "库存服务"
+        ],
+        "categoryKeywords": [
+          "延迟",
+          "慢响应",
+          "响应时间",
+          "耗时",
+          "delay",
+          "slow"
+        ],
+        "riskKeywords": [
+          "超时",
+          "timeout"
+        ],
+        "evidenceMatchers": [
+          "log:inventory-service:*",
+          "log:order-service:*",
+          "metric:inventory-service:*",
+          "metric:order-service:*"
+        ],
+        "minEvidenceMatchers": 1
+      },
+      "notes": "inventory-service 注入 3500ms 延迟；order-service 读超时 5000ms，因此预期 200 + SLOW_RESPONSE，而不是 DOWNSTREAM_TIMEOUT。"
+    },
+    {
+      "caseId": "normal-baseline",
+      "scenario": "NORMAL",
+      "diagnosis": false,
+      "injection": null,
+      "expected": {
+        "faultObserved": false,
+        "outcome": "SUCCESS",
+        "httpStatus": 200,
+        "eventExpected": false,
+        "rootCauseService": null,
+        "faultCategory": "NONE"
+      },
+      "judge": null,
+      "notes": "无故障请求只参与误报检测，不计入 Agent 根因诊断准确率，也不调用诊断接口。"
+    }
+  ]
+}

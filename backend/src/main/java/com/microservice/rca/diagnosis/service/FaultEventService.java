@@ -67,6 +67,36 @@ public class FaultEventService {
     }
 
     /**
+     * 由已注册外部服务手动发起诊断时创建事件。
+     *
+     * <p>外部事件不写入实验故障类型、实验参数或预设根因，避免把实验配置当作证据。
+     * 公共创建接口不接受 EXTERNAL，只有本方法可以写入该类事件。</p>
+     */
+    @Transactional
+    public FaultEvent createExternal(UUID externalServiceId,
+                                     String serviceName,
+                                     String eventType,
+                                     FaultSeverity severity,
+                                     String summary,
+                                     String requestId) {
+        FaultEvent event = new FaultEvent();
+        event.setServiceName(serviceName);
+        event.setEventType(eventType);
+        event.setSeverity(severity);
+        event.setSummary(summary);
+        event.setDetails(jsonSupport.write(Map.of(
+                "entry", "EXTERNAL_MANUAL",
+                "externalServiceId", externalServiceId.toString(),
+                "note", "由已注册外部服务手动发起诊断，不使用实验预设故障参数")));
+        event.setOccurredAt(Instant.now());
+        event.setStatus(FaultEventStatus.OPEN);
+        event.setRequestId(requestId);
+        event.setExternalServiceId(externalServiceId);
+        event.setSource("EXTERNAL");
+        return eventRepository.save(event);
+    }
+
+    /**
      * 由真实请求观测创建事件。预设故障参数与观测结果分开保存，且不写入 root_cause。
      */
     @Transactional
@@ -190,6 +220,21 @@ public class FaultEventService {
                 eventId, FaultEventStatus.DIAGNOSING, FaultEventStatus.OPEN, Instant.now()) > 0;
     }
 
+    /**
+     * 恢复验证通过后使用：仅当事件仍为 OPEN 时条件更新为 RESOLVED。
+     * 若人工已经关闭或解决事件，则保留人工状态并返回 false。
+     *
+     * @return 是否实际把事件更新为 RESOLVED
+     */
+    @Transactional
+    public boolean resolveIfOpen(UUID eventId) {
+        return eventRepository.resolveIfOpen(
+                eventId,
+                FaultEventStatus.OPEN,
+                FaultEventStatus.RESOLVED,
+                Instant.now()) > 0;
+    }
+
     @Transactional
     public FaultEventView saveEvidence(UUID eventId, String evidenceJson, Instant collectedAt) {
         FaultEvent event = requireEvent(eventId);
@@ -218,6 +263,7 @@ public class FaultEventService {
                 event.getUpdatedAt(),
                 event.getResolvedAt(),
                 event.getExperimentId(),
+                event.getExternalServiceId(),
                 event.getExperimentFaultType(),
                 jsonSupport.read(event.getExperimentParameters()),
                 jsonSupport.read(event.getObservedResult()),

@@ -154,6 +154,37 @@ class EvidenceServiceTest {
                 assertThat(context.timeout()).isEqualTo(Duration.ofSeconds(15)));
     }
 
+    @Test
+    void externalEventCollectsHealthLogsAndMetricsWithFixedService() {
+        FaultEvent external = new FaultEvent();
+        external.setId(eventId);
+        external.setSource("EXTERNAL");
+        external.setServiceName("petclinic");
+        external.setOccurredAt(Instant.now().minusSeconds(120));
+        when(faultEventService.requireEvent(eventId)).thenReturn(external);
+
+        when(toolInvocationService.invoke(any(), eq("query_health"), any(), eq(1)))
+                .thenReturn(outcome("query_health", true));
+        when(toolInvocationService.invoke(any(), eq("query_logs"), any(), eq(2)))
+                .thenReturn(outcome("query_logs", false));
+        when(toolInvocationService.invoke(any(), eq("query_metrics"), any(), eq(3)))
+                .thenReturn(outcome("query_metrics", false));
+
+        // 请求中的 serviceName 不能把外部证据范围改到其他服务。
+        EvidenceCollectionView view = service.collect(eventId,
+                new EvidenceQueryRequest(null, null, null, null, "order-service"));
+
+        assertThat(view.success()).isTrue();
+        assertThat(view.tools()).extracting(EvidenceCollectionView.ToolEvidenceView::toolName)
+                .containsExactly("query_health", "query_logs", "query_metrics");
+        assertThat(view.note()).contains("外部服务").contains("petclinic");
+
+        ArgumentCaptor<ToolExecutionContext> captor = ArgumentCaptor.forClass(ToolExecutionContext.class);
+        verify(toolInvocationService, times(3)).invoke(any(), anyString(), captor.capture(), anyInt());
+        assertThat(captor.getAllValues()).allSatisfy(context ->
+                assertThat(context.serviceName()).isEqualTo("petclinic"));
+    }
+
     private ToolInvocationOutcome outcome(String toolName, boolean success) {
         ToolResult result = success
                 ? ToolResult.success(Map.of("tool", toolName))

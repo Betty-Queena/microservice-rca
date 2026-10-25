@@ -59,9 +59,49 @@ public class FaultInjectionService {
         return status();
     }
 
+    /**
+     * 兼容旧调用的无条件关闭。Day 8 的受控处置不调用该重载，而是使用带
+     * expectedExperimentId 的条件关闭。
+     */
     public FaultInjectionStatus disable() {
         active.set(null);
         return status();
+    }
+
+    /**
+     * 仅当当前活动实验 ID 与期望值一致时关闭故障。
+     *
+     * <p>通过 compareAndSet 完成条件删除，避免“先读取再无条件清空”导致并发场景下
+     * 误关其他实验。没有活动故障或 ID 不匹配时返回 409，且不修改当前状态。</p>
+     */
+    public FaultInjectionStatus disable(UUID expectedExperimentId) {
+        if (expectedExperimentId == null) {
+            return disable();
+        }
+        while (true) {
+            FaultInjectionState state = active.get();
+            if (state == null) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "当前没有活动故障注入，无法按实验 ID 关闭");
+            }
+            if (!state.activeAt(Instant.now())) {
+                if (active.compareAndSet(state, null)) {
+                    throw new ResponseStatusException(HttpStatus.CONFLICT,
+                            "当前没有活动故障注入，无法按实验 ID 关闭");
+                }
+                // 过期状态被并发替换，重新读取后再判断。
+                continue;
+            }
+            if (!expectedExperimentId.toString().equals(state.experimentId())) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "实验 ID 与当前活动故障不一致: expected=" + expectedExperimentId
+                                + ", active=" + state.experimentId());
+            }
+            if (active.compareAndSet(state, null)) {
+                return status();
+            }
+            // 状态在读取后被并发修改，重新读取后再判断，不能直接清空。
+        }
     }
 
     public FaultInjectionStatus reset() {

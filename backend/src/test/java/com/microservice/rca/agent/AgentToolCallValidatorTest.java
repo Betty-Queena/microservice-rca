@@ -93,6 +93,52 @@ class AgentToolCallValidatorTest {
     }
 
     @Test
+    void externalHealthDefaultsToRegisteredService() {
+        DiagnosticToolRegistry externalRegistry = AgentTestSupport.registry(
+                tool("query_health", ToolResult.success(Map.of())),
+                tool("query_logs", ToolResult.success(logsOutput())));
+        ValidatedCall call = validator.validate(
+                AgentTestSupport.externalInput(externalRegistry, "petclinic", 4, 3),
+                "query_health", Map.of());
+
+        assertThat(call.service()).isEqualTo("petclinic");
+        assertThat(call.parameters()).doesNotContainKey("lookbackMinutes");
+    }
+
+    @Test
+    void externalDiagnosisCannotQueryAnotherService() {
+        DiagnosticToolRegistry externalRegistry = AgentTestSupport.registry(
+                tool("query_health", ToolResult.success(Map.of())),
+                tool("query_metrics", ToolResult.success(metricsOutput())));
+        assertThatThrownBy(() -> validator.validate(
+                AgentTestSupport.externalInput(externalRegistry, "petclinic", 4, 3),
+                "query_metrics", Map.of("service", "order-service")))
+                .isInstanceOf(AgentValidationException.class)
+                .hasMessageContaining("不支持的服务");
+    }
+
+    @Test
+    void healthToolIsRejectedForBuiltInDiagnosis() {
+        DiagnosticToolRegistry registryWithHealth = AgentTestSupport.registry(
+                tool("query_health", ToolResult.success(Map.of())));
+        assertThatThrownBy(() -> validator.validate(
+                input(registryWithHealth, 4, 3), "query_health", Map.of()))
+                .isInstanceOf(AgentValidationException.class)
+                .hasMessageContaining("仅支持外部服务诊断");
+    }
+
+    @Test
+    void healthToolRejectsLookbackArgument() {
+        DiagnosticToolRegistry externalRegistry = AgentTestSupport.registry(
+                tool("query_health", ToolResult.success(Map.of())));
+        assertThatThrownBy(() -> validator.validate(
+                AgentTestSupport.externalInput(externalRegistry, "petclinic", 4, 3),
+                "query_health", Map.of("lookbackMinutes", 10)))
+                .isInstanceOf(AgentValidationException.class)
+                .hasMessageContaining("不接受 lookbackMinutes");
+    }
+
+    @Test
     void rejectsRequestIdForMetrics() {
         assertThatThrownBy(() -> validator.validate(input(registry, 4, 3), "query_metrics",
                 Map.of("requestId", "exp-abc123")))

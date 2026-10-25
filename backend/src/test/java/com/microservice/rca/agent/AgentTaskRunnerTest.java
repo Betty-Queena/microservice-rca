@@ -71,7 +71,8 @@ class AgentTaskRunnerTest {
         runner = new AgentTaskRunner(
                 taskRepository,
                 eventRepository,
-                new AgentInputFactory(json(), registry, properties(4, 3)),
+                new AgentInputFactory(json(), registry,
+                        AgentTestSupport.externalServiceRegistry(), properties(4, 3)),
                 orchestrator,
                 modelClient,
                 json());
@@ -117,6 +118,31 @@ class AgentTaskRunnerTest {
         assertThat(saved.getRootCause()).isNull();
         assertThat(saved.getConfidenceLevel()).isNull();
         assertThat(saved.getConclusion()).contains("证据不足");
+        assertThat(saved.getFailureReason()).isNull();
+    }
+
+    @Test
+    void persistsLowConfidenceHypothesisWithoutWritingRootCause() {
+        when(orchestrator.diagnose(any())).thenReturn(
+                AgentOrchestrator.AgentRunResult.lowConfidenceHypothesis(
+                        Map.of(
+                                "result", "INSUFFICIENT_EVIDENCE",
+                                "assessment", "LOW_CONFIDENCE_HYPOTHESIS",
+                                "rootCause", "可能是数据库连接失败",
+                                "hypothesis", "数据库连接池无法获取连接",
+                                "componentEvidenceAvailable", false),
+                        List.of(Map.of("type", "MODEL_DECISION")),
+                        "deepseek-flash"));
+
+        runner.run(task.getId());
+
+        DiagnosisTask saved = lastSaved();
+        assertThat(saved.getStatus()).isEqualTo(DiagnosisStatus.SUCCEEDED);
+        assertThat(saved.getResultStatus()).isEqualTo(DiagnosisResultStatus.INSUFFICIENT_EVIDENCE);
+        assertThat(saved.getConfidenceLevel()).isEqualTo("LOW");
+        assertThat(saved.getRootCause()).isNull();
+        assertThat(saved.getConclusion()).contains("低置信度假说").contains("数据库连接池");
+        assertThat(saved.getReport()).contains("LOW_CONFIDENCE_HYPOTHESIS");
         assertThat(saved.getFailureReason()).isNull();
     }
 

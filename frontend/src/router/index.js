@@ -4,6 +4,7 @@ import OverviewView from '../views/OverviewView.vue'
 import FaultInjectionView from '../views/FaultInjectionView.vue'
 import FaultEventsView from '../views/FaultEventsView.vue'
 import FaultEventDetailView from '../views/FaultEventDetailView.vue'
+import ExternalServicesView from '../views/ExternalServicesView.vue'
 import PlaceholderView from '../views/PlaceholderView.vue'
 
 const routes = [
@@ -35,6 +36,12 @@ const routes = [
         name: 'fault-event-detail',
         component: FaultEventDetailView,
         meta: { title: '故障事件详情' }
+      },
+      {
+        path: 'external-services',
+        name: 'external-services',
+        component: ExternalServicesView,
+        meta: { title: '外部服务' }
       },
       {
         path: 'diagnosis-tasks',

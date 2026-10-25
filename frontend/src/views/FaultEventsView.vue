@@ -3,6 +3,7 @@ import { onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { Refresh, Search } from '@element-plus/icons-vue'
 import { fetchFaultEvents } from '../api/faultEvents'
+import { fetchExternalServices } from '../api/externalServices'
 
 const router = useRouter()
 const loading = ref(false)
@@ -27,10 +28,18 @@ const statusOptions = [
   { value: 'CLOSED', label: '已关闭' }
 ]
 
-const serviceOptions = [
+const serviceOptions = ref([
   { value: 'order-service', label: 'order-service' },
   { value: 'inventory-service', label: 'inventory-service' }
-]
+])
+
+function sourceType(source) {
+  return { EXPERIMENT: 'warning', EXTERNAL: 'success', MANUAL: 'info' }[source] || 'info'
+}
+
+function sourceText(source) {
+  return { EXPERIMENT: '实验', EXTERNAL: '外部', MANUAL: '人工' }[source] || source || '—'
+}
 
 function statusType(status) {
   return {
@@ -52,6 +61,20 @@ function severityType(severity) {
 function formatTime(value) {
   if (!value) return '—'
   return new Date(value).toLocaleString('zh-CN', { hour12: false })
+}
+
+async function loadServiceOptions() {
+  try {
+    const external = await fetchExternalServices({ enabledOnly: true })
+    const builtIn = new Set(serviceOptions.value.map((item) => item.value))
+    for (const service of external || []) {
+      if (!builtIn.has(service.name)) {
+        serviceOptions.value.push({ value: service.name, label: service.name })
+      }
+    }
+  } catch {
+    // 外部服务列表加载失败不影响故障事件主列表。
+  }
 }
 
 async function load() {
@@ -94,7 +117,10 @@ function openDetail(row) {
   router.push(`/fault-events/${row.id}`)
 }
 
-onMounted(load)
+onMounted(() => {
+  loadServiceOptions()
+  load()
+})
 </script>
 
 <template>
@@ -147,6 +173,13 @@ onMounted(load)
           <template #default="{ row }">{{ formatTime(row.occurredAt) }}</template>
         </el-table-column>
         <el-table-column prop="serviceName" label="服务" width="170" />
+        <el-table-column label="来源" width="80">
+          <template #default="{ row }">
+            <el-tag :type="sourceType(row.source)" effect="plain" size="small">
+              {{ sourceText(row.source) }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column
           prop="eventType"
           label="观测类型"

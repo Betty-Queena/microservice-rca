@@ -33,6 +33,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
+import org.springframework.web.client.RestClient;
 
 class DefaultAgentOrchestratorTest {
 
@@ -190,6 +191,37 @@ class DefaultAgentOrchestratorTest {
             assertThat(entry.get("modelCallAttempted")).isEqualTo(false);
         });
         assertThat(model.requests()).isEmpty();
+    }
+
+    @Test
+    void recordsLlmDisabledFailureWithoutAttemptingHttp() {
+        DiagnosticToolRegistry registry = AgentTestSupport.registry(
+                tool("query_logs", ToolResult.success(logsOutput())));
+        AgentProperties disabled = new AgentProperties(
+                false,
+                new AgentProperties.DeepSeek("test-key", "http://127.0.0.1:1", "deepseek-flash",
+                        0.1, 500, 1000, 3000),
+                new AgentProperties.Limits(2, 2, 12000, 60000, 6000, 60));
+        AgentModelClient model = new DeepSeekAgentModelClient(RestClient.builder(), disabled);
+        DefaultAgentOrchestrator orchestrator = new DefaultAgentOrchestrator(
+                model,
+                new AgentPromptBuilder(AgentTestSupport.json()),
+                new AgentDecisionParser(mapper()),
+                new AgentToolCallValidator(),
+                new AgentReportValidator(),
+                invocationService(registry, AgentTestSupport.invocationRepository()),
+                disabled);
+
+        AgentRunResult result = orchestrator.diagnose(input(registry, 2, 2));
+
+        assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.FAILED);
+        assertThat(result.failureReason()).contains("RCA_LLM_ENABLED=false");
+        assertThat(result.report()).isNull();
+        assertThat(result.decisionTrace()).anySatisfy(entry -> {
+            assertThat(entry.get("status")).isEqualTo("FAILED");
+            assertThat(entry.get("errorType")).isEqualTo("LLM_DISABLED");
+            assertThat(entry.get("modelCallAttempted")).isEqualTo(false);
+        });
     }
 
     @Test
@@ -381,7 +413,8 @@ class DefaultAgentOrchestratorTest {
         DiagnosticToolRegistry registry = AgentTestSupport.registry(
                 tool("query_logs", ToolResult.success(logsOutput())));
         AgentInputFactory factory = new AgentInputFactory(
-                AgentTestSupport.json(), registry, properties(3, 2));
+                AgentTestSupport.json(), registry,
+                AgentTestSupport.externalServiceRegistry(), properties(3, 2));
         DiagnosisTask task = new DiagnosisTask();
         task.setId(UUID.randomUUID());
         task.setFaultEventId(UUID.randomUUID());
@@ -411,6 +444,123 @@ class DefaultAgentOrchestratorTest {
         assertThat(prompt).doesNotContain("experimentParameters");
         assertThat(prompt).doesNotContain("DELAY");
         assertThat(prompt).doesNotContain("3500");
+    }
+
+    @Test
+    void retriesLengthTruncationOnlyOnceThenFailsExplicitly() {
+        DiagnosticToolRegistry registry = AgentTestSupport.registry(
+                tool("query_logs", ToolResult.success(logsOutput())));
+        AgentModelClient.ModelResponse truncated = new AgentModelClient.ModelResponse(
+                "{\"action\":", "mock-deepseek", 100, 1200, true, "length");
+        AgentTestSupport.ScriptedModelClient model = new AgentTestSupport.ScriptedModelClient(
+                true, truncated, truncated);
+
+        AgentRunResult result = orchestrator(model, registry,
+                AgentTestSupport.invocationRepository(), 6, 3)
+                .diagnose(input(registry, 6, 3));
+
+        assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.FAILED);
+        assertThat(result.failureReason()).contains("长度截断");
+        assertThat(model.requests()).hasSize(2);
+        assertThat(result.decisionTrace()).anySatisfy(entry -> {
+            assertThat(entry.get("finishReason")).isEqualTo("length");
+            assertThat(entry.get("lengthTruncated")).isEqualTo(true);
+        });
+    }
+
+    @Test
+    void oneLengthTruncationRetryCanRecover() {
+        DiagnosticToolRegistry registry = AgentTestSupport.registry(
+                tool("query_logs", ToolResult.success(logsOutput())));
+        AgentModelClient.ModelResponse truncated = new AgentModelClient.ModelResponse(
+                "{\"action\":", "mock-deepseek", 100, 1200, true, "length");
+        AgentTestSupport.ScriptedModelClient model = new AgentTestSupport.ScriptedModelClient(
+                true, truncated, insufficientEvidence());
+
+        AgentRunResult result = orchestrator(model, registry,
+                AgentTestSupport.invocationRepository(), 4, 3)
+                .diagnose(input(registry, 4, 3));
+
+        assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.INSUFFICIENT_EVIDENCE);
+        assertThat(model.requests()).hasSize(2);
+        assertThat(result.decisionTrace()).anySatisfy(entry ->
+                assertThat(entry.get("decision")).isEqualTo("INVALID_OUTPUT"));
+    }
+
+    @Test
+    void malformedJsonIsRejectedAndFedBackWithoutPretendingToBeEvidence() {
+        DiagnosticToolRegistry registry = AgentTestSupport.registry(
+                tool("query_logs", ToolResult.success(logsOutput())));
+        AgentTestSupport.ScriptedModelClient model = new AgentTestSupport.ScriptedModelClient(
+                true, "{not-json", insufficientEvidence());
+
+        AgentRunResult result = orchestrator(model, registry,
+                AgentTestSupport.invocationRepository(), 4, 3)
+                .diagnose(input(registry, 4, 3));
+
+        assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.INSUFFICIENT_EVIDENCE);
+        assertThat(result.report()).doesNotContainKey("rootCause");
+        assertThat(model.requests()).hasSize(2);
+        assertThat(result.decisionTrace()).anySatisfy(entry -> {
+            assertThat(entry.get("decision")).isEqualTo("INVALID_OUTPUT");
+            assertThat(entry.get("validationError")).isNotNull();
+        });
+    }
+
+    @Test
+    void lowConfidenceWithoutComponentEvidenceIsOnlyAHypothesis() {
+        DiagnosticToolRegistry registry = AgentTestSupport.registry(
+                tool("query_health", ToolResult.success(healthOutput(false))));
+        AgentTestSupport.ScriptedModelClient model = new AgentTestSupport.ScriptedModelClient(
+                true,
+                callTool("query_health", Map.of("service", "petclinic")),
+                finalReport(List.of("health:petclinic:1"), "LOW", "petclinic"));
+
+        AgentRunResult result = orchestrator(model, registry,
+                AgentTestSupport.invocationRepository(), 4, 3)
+                .diagnose(AgentTestSupport.externalInput(registry, "petclinic", 4, 3));
+
+        assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.INSUFFICIENT_EVIDENCE);
+        assertThat(result.confidenceLevel()).isEqualTo("LOW");
+        assertThat(result.report()).containsEntry("assessment", "LOW_CONFIDENCE_HYPOTHESIS")
+                .containsEntry("componentEvidenceAvailable", false)
+                .containsKey("rootCause");
+    }
+
+    @Test
+    void lowConfidenceWithComponentEvidenceKeepsRootCauseStatus() {
+        DiagnosticToolRegistry registry = AgentTestSupport.registry(
+                tool("query_health", ToolResult.success(healthOutput(true))));
+        AgentTestSupport.ScriptedModelClient model = new AgentTestSupport.ScriptedModelClient(
+                true,
+                callTool("query_health", Map.of("service", "petclinic")),
+                finalReport(List.of("health:petclinic:1:db"), "LOW", "petclinic"));
+
+        AgentRunResult result = orchestrator(model, registry,
+                AgentTestSupport.invocationRepository(), 4, 3)
+                .diagnose(AgentTestSupport.externalInput(registry, "petclinic", 4, 3));
+
+        assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.ROOT_CAUSE_IDENTIFIED);
+        assertThat(result.report()).containsEntry("assessment", "ROOT_CAUSE_IDENTIFIED")
+                .containsEntry("componentEvidenceAvailable", true);
+    }
+
+    private Map<String, Object> healthOutput(boolean withComponents) {
+        if (withComponents) {
+            return Map.of(
+                    "tool", "query_health",
+                    "status", "DOWN",
+                    "evidenceIds", List.of("health:petclinic:1", "health:petclinic:1:db"),
+                    "componentEvidenceIds", List.of("health:petclinic:1:db"),
+                    "components", List.of(Map.of(
+                            "path", "db",
+                            "status", "DOWN",
+                            "evidenceId", "health:petclinic:1:db")));
+        }
+        return Map.of(
+                "tool", "query_health",
+                "status", "DOWN",
+                "evidenceIds", List.of("health:petclinic:1"));
     }
 
     private DefaultAgentOrchestrator orchestrator(AgentModelClient model,

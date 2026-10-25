@@ -66,6 +66,9 @@ public class FaultEvent {
     @Column(name = "experiment_id")
     private UUID experimentId;
 
+    @Column(name = "external_service_id")
+    private UUID externalServiceId;
+
     @Column(name = "experiment_fault_type", length = 64)
     private String experimentFaultType;
 
@@ -180,6 +183,14 @@ public class FaultEvent {
 
     public void setExperimentId(UUID experimentId) {
         this.experimentId = experimentId;
+    }
+
+    public UUID getExternalServiceId() {
+        return externalServiceId;
+    }
+
+    public void setExternalServiceId(UUID externalServiceId) {
+        this.externalServiceId = externalServiceId;
     }
 
     public String getExperimentFaultType() {

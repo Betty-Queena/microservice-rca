@@ -27,6 +27,17 @@ public class AgentPromptBuilder {
     }
 
     public String systemPrompt() {
+        return builtInSystemPrompt();
+    }
+
+    public String systemPrompt(AgentOrchestrator.AgentInput input) {
+        if (input != null && "EXTERNAL".equalsIgnoreCase(input.serviceKind())) {
+            return externalSystemPrompt(input);
+        }
+        return builtInSystemPrompt();
+    }
+
+    private String builtInSystemPrompt() {
         return """
                 你是微服务故障诊断 Agent。你只能通过只读诊断工具获取证据，并在证据充分时输出结构化根因报告。
                 你的每个回合只能输出一个 JSON 对象，不要输出 Markdown、解释文字或思维链。
@@ -54,6 +65,70 @@ public class AgentPromptBuilder {
                 """;
     }
 
+    private String externalSystemPrompt(AgentOrchestrator.AgentInput input) {
+        String serviceName = input.serviceName() == null ? "" : input.serviceName();
+        String allowed = input.allowedServices() == null || input.allowedServices().isEmpty()
+                ? serviceName : String.join("/", input.allowedServices());
+        List<String> toolNames = input.availableTools().stream()
+                .map(DiagnosticToolRegistry.ToolDefinition::name)
+                .toList();
+        String availableToolText = toolNames.isEmpty() ? "无" : String.join("/", toolNames);
+        boolean logsAvailable = toolNames.contains("query_logs");
+
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("""
+                你是运行在故障分析平台中的诊断 Agent。本次诊断对象是已注册的外部 Spring Boot 服务：%s。
+                该对象不属于内置故障注入实验，没有预设故障类型、预设实验参数或预设根因。
+                你只能通过只读工具获取证据，并在证据充分时输出结构化根因报告。
+                你的每个回合只能输出一个 JSON 对象，不要输出 Markdown、解释文字或思维链。
+                JSON 中必须包含 action 字段，取值只能是 CALL_TOOL、FINAL_REPORT、INSUFFICIENT_EVIDENCE。
+
+                可选动作：
+                1. 查询 Actuator 健康快照：
+                   {"action":"CALL_TOOL","tool":"query_health","arguments":{"service":"%s"},"reason":"决策摘要"}
+                   query_health 返回整体状态和组件级状态；异常组件会包含脱敏后的 errorType/errorSummary，
+                   并在 evidenceIds 中提供组件级证据 ID。不接受 lookbackMinutes。
+                2. 查询 Actuator 指标快照：
+                   {"action":"CALL_TOOL","tool":"query_metrics","arguments":{"service":"%s","lookbackMinutes":30},"reason":"决策摘要"}
+                   query_metrics 返回当前暴露的指标快照，优先包含连接池超时/获取耗时等异常相关指标；
+                   timeWindowSupported=false，不是历史时间序列。
+                """.formatted(serviceName, allowed, allowed));
+        if (logsAvailable) {
+            prompt.append("""
+                    3. 查询日志（该服务已显式配置日志数据源）：
+                       {"action":"CALL_TOOL","tool":"query_logs","arguments":{"service":"%s","requestId":"可选","limit":50},"reason":"决策摘要"}
+                       工具失败表示日志不可用，不能据此推断没有异常，更不能编造日志。
+                    """.formatted(allowed));
+        }
+        int finalActionNo = logsAvailable ? 4 : 3;
+        int insufficientActionNo = finalActionNo + 1;
+        prompt.append("""
+                %d. 输出根因报告：
+                   {"action":"FINAL_REPORT","report":{"rootCause":"根因描述","affectedServices":["%s"],"hypothesis":"可验证的故障假设","supportingEvidenceIds":["health:%s:..."],"contradictingEvidenceIds":[],"confidenceLevel":"MEDIUM","recommendedActions":["仅建议人工确认后的处置"],"limitations":["证据或分析限制"]},"reason":"决策摘要"}
+                %d. 证据不足：
+                   {"action":"INSUFFICIENT_EVIDENCE","reason":"现有证据不足的具体原因","limitations":["缺少哪些证据"]}
+
+                强制规则：
+                - 只能使用本次 availableTools 中的只读工具（%s）；不能重启、停止、修改外部服务，也不能请求执行命令、SQL 或任意 HTTP 请求。
+                - 不得把任何实验预设故障类型、实验参数、实验根因或历史实验结论当作本次诊断的证据。
+                - Actuator 健康状态与指标都是单次快照，不能代表历史可用性或完整时间序列；缺少某个指标不代表该指标正常。
+                - query_health 返回组件级状态时，应优先使用具体组件的 evidenceId（形如 health:服务:时间戳:组件路径），不要只引用整体状态。
+                - 没有依赖拓扑工具，不得编造服务依赖或调用链。
+                - supportingEvidenceIds 中的每个 ID 必须原样出现在真实工具结果的 evidenceIds 中，禁止编造。
+                - affectedServices 只能填写 "%s"；不得填写未注册的服务。
+                - confidenceLevel 只能是 HIGH、MEDIUM、LOW，不输出精确概率。
+                - 如果只有整体 UP/DOWN 或通用 JVM/HTTP 指标，没有组件级证据，不得声称已经定位到具体根因；应输出 INSUFFICIENT_EVIDENCE。
+                - 工具失败或证据不足时，必须选择 INSUFFICIENT_EVIDENCE，不能编造根因。
+                - 不要重复提交完全相同的工具调用；请使用已有观察结果继续分析或结束调查。
+                """.formatted(finalActionNo, serviceName, serviceName,
+                insufficientActionNo, availableToolText, serviceName));
+        String unavailableReason = input.unavailableTools().get("query_logs");
+        if (!logsAvailable && unavailableReason != null && !unavailableReason.isBlank()) {
+            prompt.append("- 本次日志不可用：").append(unavailableReason).append('\n');
+        }
+        return prompt.toString();
+    }
+
     public String userPrompt(AgentOrchestrator.AgentInput input,
                              List<Observation> observations,
                              String validationFeedback,
@@ -62,6 +137,8 @@ public class AgentPromptBuilder {
         Map<String, Object> event = new LinkedHashMap<>();
         event.put("faultEventId", input.faultEventId().toString());
         event.put("serviceName", input.serviceName());
+        event.put("serviceKind", input.serviceKind());
+        event.put("allowedServices", input.allowedServices());
         event.put("eventType", input.eventType());
         event.put("severity", input.severity());
         event.put("summary", input.summary());
@@ -111,6 +188,9 @@ public class AgentPromptBuilder {
         payload.put("event", event);
         payload.put("investigationState", state);
         payload.put("availableTools", toolDefinitions);
+        if (!input.unavailableTools().isEmpty()) {
+            payload.put("unavailableTools", input.unavailableTools());
+        }
         payload.put("observations", compactObservations);
         payload.put("knownEvidenceIds", evidenceList);
         if (omittedEvidenceIds > 0) {
