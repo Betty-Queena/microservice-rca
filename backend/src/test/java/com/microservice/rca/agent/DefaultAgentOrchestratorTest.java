@@ -545,6 +545,68 @@ class DefaultAgentOrchestratorTest {
                 .containsEntry("componentEvidenceAvailable", true);
     }
 
+    @Test
+    void failedProbeConnectivityEvidenceIsPreservedInInsufficientReport() {
+        Map<String, Object> connectivityOutput = Map.of(
+                "tool", "query_health",
+                "available", false,
+                "failureType", "CONNECTIVITY_FAILURE",
+                "evidenceIds", List.of("connectivity:petclinic:health:1"));
+        DiagnosticToolRegistry registry = AgentTestSupport.registry(
+                tool("query_health", ToolResult.failure(
+                        "query_health 不可用: 连接被拒绝或服务未启动", connectivityOutput)));
+        AgentTestSupport.ScriptedModelClient model = new AgentTestSupport.ScriptedModelClient(
+                true,
+                callTool("query_health", Map.of("service", "petclinic")),
+                insufficientEvidence());
+
+        AgentRunResult result = orchestrator(model, registry,
+                AgentTestSupport.invocationRepository(), 4, 3)
+                .diagnose(AgentTestSupport.externalInput(registry, "petclinic", 4, 3));
+
+        assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.INSUFFICIENT_EVIDENCE);
+        assertThat(result.report().get("observedEvidenceIds")).asList()
+                .containsExactly("connectivity:petclinic:health:1");
+        assertThat(result.decisionTrace()).anySatisfy(entry -> {
+            if ("TOOL_EXECUTION".equals(entry.get("type"))) {
+                assertThat(entry.get("status")).isEqualTo("FAILED");
+                assertThat(entry.get("evidenceIds")).asList()
+                        .containsExactly("connectivity:petclinic:health:1");
+            }
+        });
+    }
+
+    @Test
+    void connectivityOnlyFinalReportIsNotConfirmedAsRootCause() {
+        Map<String, Object> connectivityOutput = Map.of(
+                "tool", "query_health",
+                "available", false,
+                "failureType", "CONNECTIVITY_FAILURE",
+                "evidenceIds", List.of("connectivity:petclinic:health:1"));
+        DiagnosticToolRegistry registry = AgentTestSupport.registry(
+                tool("query_health", ToolResult.failure(
+                        "query_health 不可用: 连接被拒绝或服务未启动", connectivityOutput)));
+        AgentTestSupport.ScriptedModelClient model = new AgentTestSupport.ScriptedModelClient(
+                true,
+                callTool("query_health", Map.of("service", "petclinic")),
+                finalReport(List.of("connectivity:petclinic:health:1"), "MEDIUM", "petclinic"));
+
+        AgentRunResult result = orchestrator(model, registry,
+                AgentTestSupport.invocationRepository(), 4, 3)
+                .diagnose(AgentTestSupport.externalInput(registry, "petclinic", 4, 3));
+
+        assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.INSUFFICIENT_EVIDENCE);
+        assertThat(result.confidenceLevel()).isEqualTo("LOW");
+        assertThat(result.report())
+                .containsEntry("assessment", "LOW_CONFIDENCE_HYPOTHESIS")
+                .containsEntry("componentEvidenceAvailable", false);
+        assertThat(result.decisionTrace()).anySatisfy(entry -> {
+            if ("FINAL_REPORT_ACCEPTED".equals(entry.get("decision"))) {
+                assertThat(entry.get("connectivityEvidenceOnly")).isEqualTo(true);
+            }
+        });
+    }
+
     private Map<String, Object> healthOutput(boolean withComponents) {
         if (withComponents) {
             return Map.of(

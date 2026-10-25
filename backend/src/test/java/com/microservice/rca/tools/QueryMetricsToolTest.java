@@ -132,7 +132,31 @@ class QueryMetricsToolTest {
                 UUID.randomUUID(), "petclinic", START, END, Map.of()));
 
         assertThat(result.success()).isFalse();
+        assertThat(result.output()).isEmpty();
         assertThat(result.errorMessage()).contains("不可用").contains("指标端点未暴露");
+    }
+
+    @Test
+    void externalMetricsConnectionFailureEmitsConnectivityEvidence() {
+        ExternalService service = externalService("petclinic");
+        Instant collectedAt = Instant.parse("2026-10-25T02:00:00Z");
+        when(externalRegistry.findByName("petclinic")).thenReturn(Optional.of(service));
+        when(externalClient.metrics(service)).thenReturn(
+                ExternalActuatorClient.MetricsSnapshot.unreachable(
+                        "连接被拒绝或服务未启动", collectedAt));
+
+        ToolResult result = tool.execute(new ToolExecutionContext(
+                UUID.randomUUID(), "petclinic", START, END, Map.of()));
+
+        assertThat(result.success()).isFalse();
+        assertThat(result.output())
+                .containsEntry("failureType", "CONNECTIVITY_FAILURE")
+                .containsEntry("available", false)
+                .containsEntry("connectivity", "UNREACHABLE")
+                .doesNotContainKey("metrics");
+        assertThat(result.output().get("evidenceIds")).asList()
+                .containsExactly("connectivity:petclinic:metrics:"
+                        + collectedAt.toEpochMilli());
     }
 
     private ExternalService externalService(String name) {

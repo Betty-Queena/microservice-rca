@@ -87,6 +87,48 @@ class QueryHealthToolTest {
                 .containsExactly("health:petclinic:" + collectedAt.toEpochMilli());
     }
 
+    @Test
+    void failedHealthProbeEmitsConnectivityEvidenceWithoutFakeStatus() {
+        ExternalService service = service();
+        Instant collectedAt = Instant.parse("2026-10-25T02:00:00Z");
+        when(registry.findByName("petclinic")).thenReturn(Optional.of(service));
+        when(client.health(service)).thenReturn(new ExternalActuatorClient.HealthSnapshot(
+                false, "UNREACHABLE", -1, 0,
+                "连接被拒绝或服务未启动", collectedAt));
+
+        ToolResult result = tool.execute(new ToolExecutionContext(
+                UUID.randomUUID(), "petclinic", collectedAt.minusSeconds(60),
+                collectedAt, Map.of()));
+
+        assertThat(result.success()).isFalse();
+        assertThat(result.output())
+                .containsEntry("failureType", "CONNECTIVITY_FAILURE")
+                .containsEntry("available", false)
+                .containsEntry("connectivity", "UNREACHABLE")
+                .doesNotContainKey("status")
+                .doesNotContainKey("httpStatus");
+        assertThat(result.output().get("evidenceIds")).asList()
+                .containsExactly("connectivity:petclinic:health:"
+                        + collectedAt.toEpochMilli());
+    }
+
+    @Test
+    void invalidHealthTargetDoesNotBecomeConnectivityEvidence() {
+        ExternalService service = service();
+        Instant collectedAt = Instant.parse("2026-10-25T02:00:00Z");
+        when(registry.findByName("petclinic")).thenReturn(Optional.of(service));
+        when(client.health(service)).thenReturn(new ExternalActuatorClient.HealthSnapshot(
+                false, "INVALID_CONFIG", -1, 0, "外部服务基地址不合法", collectedAt));
+
+        ToolResult result = tool.execute(new ToolExecutionContext(
+                UUID.randomUUID(), "petclinic", collectedAt.minusSeconds(60),
+                collectedAt, Map.of()));
+
+        assertThat(result.success()).isFalse();
+        assertThat(result.output()).isEmpty();
+        assertThat(result.errorMessage()).contains("外部服务基地址不合法");
+    }
+
     private ExternalService service() {
         ExternalService service = new ExternalService();
         service.setId(UUID.randomUUID());

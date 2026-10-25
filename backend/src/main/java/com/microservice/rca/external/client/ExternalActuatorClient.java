@@ -102,9 +102,16 @@ public class ExternalActuatorClient {
 
     public HealthSnapshot health(ExternalService service) {
         Instant collectedAt = Instant.now();
+        URI uri;
         try {
-            URI uri = validator.resolve(
+            uri = validator.resolve(
                     validator.validateBaseUrl(service.getBaseUrl()), service.getHealthPath());
+        } catch (Exception ex) {
+            // 地址配置不合法时没有真实网络探测，不能生成连通性证据。
+            return new HealthSnapshot(false, "INVALID_CONFIG", -1, 0,
+                    safeMessage(ex), collectedAt, List.of(), false, 0);
+        }
+        try {
             ExternalServiceHttpClient.HttpResult result = httpClient.get(uri);
             // HTTP 503 等非 2xx 响应同样携带 Actuator 的 components 明细，必须读取响应体。
             HealthDetail detail = parseHealthDetail(result.body());
@@ -118,8 +125,12 @@ public class ExternalActuatorClient {
                     detail != null ? detail.components() : List.of(),
                     detail != null && detail.componentsTruncated(),
                     detail != null ? detail.omittedComponentCount() : 0);
-        } catch (Exception ex) {
+        } catch (ExternalServiceException ex) {
+            // 只有真正发起 HTTP 探测后的连接拒绝、超时等异常才属于服务不可达。
             return new HealthSnapshot(false, "UNREACHABLE", -1, 0,
+                    safeMessage(ex), collectedAt, List.of(), false, 0);
+        } catch (Exception ex) {
+            return new HealthSnapshot(false, "PROBE_ERROR", -1, 0,
                     safeMessage(ex), collectedAt, List.of(), false, 0);
         }
     }
@@ -129,8 +140,13 @@ public class ExternalActuatorClient {
         if (blank(service.getMetricsPath())) {
             return MetricsSnapshot.unavailable("外部服务未配置指标端点", collectedAt);
         }
+        URI baseUri;
         try {
-            URI baseUri = validator.validateBaseUrl(service.getBaseUrl());
+            baseUri = validator.validateBaseUrl(service.getBaseUrl());
+        } catch (Exception ex) {
+            return MetricsSnapshot.unavailable(safeMessage(ex), collectedAt);
+        }
+        try {
             String metricsPath = service.getMetricsPath();
             ExternalServiceHttpClient.HttpResult namesResult =
                     httpClient.get(validator.resolve(baseUri, metricsPath));
@@ -181,6 +197,9 @@ public class ExternalActuatorClient {
             }
             return new MetricsSnapshot(true, List.copyOf(samples),
                     "指标为本次采集快照，不支持任意历史时间窗口", collectedAt, warnings);
+        } catch (ExternalServiceException ex) {
+            // 指标端点真实连接失败时才标记为不可达；HTTP 非 2xx 仍按端点可达处理。
+            return MetricsSnapshot.unreachable(safeMessage(ex), collectedAt);
         } catch (Exception ex) {
             return MetricsSnapshot.unavailable(safeMessage(ex), collectedAt);
         }
@@ -619,10 +638,23 @@ public class ExternalActuatorClient {
                                   List<MetricSample> metrics,
                                   String message,
                                   Instant collectedAt,
-                                  List<String> warnings) {
+                                  List<String> warnings,
+                                  boolean connectivityFailure) {
+
+        public MetricsSnapshot(boolean available,
+                               List<MetricSample> metrics,
+                               String message,
+                               Instant collectedAt,
+                               List<String> warnings) {
+            this(available, metrics, message, collectedAt, warnings, false);
+        }
 
         public static MetricsSnapshot unavailable(String message, Instant collectedAt) {
-            return new MetricsSnapshot(false, List.of(), message, collectedAt, List.of());
+            return new MetricsSnapshot(false, List.of(), message, collectedAt, List.of(), false);
+        }
+
+        public static MetricsSnapshot unreachable(String message, Instant collectedAt) {
+            return new MetricsSnapshot(false, List.of(), message, collectedAt, List.of(), true);
         }
     }
 

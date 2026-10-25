@@ -153,6 +153,10 @@ public class QueryMetricsTool implements DiagnosticTool {
     private ToolResult executeExternal(ExternalService service, ToolExecutionContext context) {
         ExternalActuatorClient.MetricsSnapshot snapshot = externalActuatorClient.metrics(service);
         if (!snapshot.available()) {
+            if (snapshot.connectivityFailure()) {
+                return ToolResult.failure("query_metrics 不可用: " + snapshot.message(),
+                        connectivityOutput(service, snapshot));
+            }
             return ToolResult.failure("query_metrics 不可用: " + snapshot.message());
         }
 
@@ -200,6 +204,28 @@ public class QueryMetricsTool implements DiagnosticTool {
         output.put("dataNote",
                 "Actuator 指标为本次采集快照，不支持任意历史时间窗口；指标缺失不代表未发生异常");
         return ToolResult.success(output);
+    }
+
+    private Map<String, Object> connectivityOutput(
+            ExternalService service, ExternalActuatorClient.MetricsSnapshot snapshot) {
+        String evidenceId = "connectivity:" + service.getName() + ":metrics:"
+                + snapshot.collectedAt().toEpochMilli();
+        Map<String, Object> output = new LinkedHashMap<>();
+        output.put("tool", name());
+        output.put("external", true);
+        output.put("service", service.getName());
+        output.put("available", false);
+        output.put("probe", "actuator-metrics");
+        output.put("probeStatus", "FAILED");
+        output.put("failureType", "CONNECTIVITY_FAILURE");
+        output.put("connectivity", "UNREACHABLE");
+        output.put("error", snapshot.message());
+        output.put("collectedAt", snapshot.collectedAt().toString());
+        output.put("evidenceIds", List.of(evidenceId));
+        output.put("dataNote",
+                "该证据仅表示本次指标探测未建立连接，不能据此断言进程已停止、"
+                        + "服务已崩溃或网络配置错误；具体根因待核实");
+        return output;
     }
 
     @SuppressWarnings("unchecked")

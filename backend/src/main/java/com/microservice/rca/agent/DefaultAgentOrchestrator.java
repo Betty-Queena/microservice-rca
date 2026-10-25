@@ -218,9 +218,9 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                         toolCalls);
 
                 List<String> evidenceIds = extractEvidenceIds(outcome.result().output());
-                if (outcome.result().success()) {
-                    knownEvidenceIds.addAll(evidenceIds);
-                }
+                // 失败的工具结果也可能携带真实探测证据（如 connectivity:），
+                // 必须保留下来供模型、最终报告和审计引用；成功状态仍按工具结果单独判断。
+                knownEvidenceIds.addAll(evidenceIds);
                 Observation observation = new Observation(
                         modelCalls,
                         call.toolName(),
@@ -257,19 +257,24 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                     Map<String, Object> report = new LinkedHashMap<>(validated.report());
                     boolean external = "EXTERNAL".equalsIgnoreCase(input.serviceKind());
                     boolean componentEvidenceAvailable = hasComponentEvidence(observations);
+                    boolean connectivityEvidenceOnly = external
+                            && onlyConnectivityEvidence(observations);
                     boolean hypothesisOnly = external
-                            && "LOW".equalsIgnoreCase(validated.confidenceLevel())
-                            && !componentEvidenceAvailable;
+                            && !componentEvidenceAvailable
+                            && ("LOW".equalsIgnoreCase(validated.confidenceLevel())
+                            || connectivityEvidenceOnly);
                     if (external) {
                         report.put("componentEvidenceAvailable", componentEvidenceAvailable);
                         report.put("assessment", hypothesisOnly
                                 ? "LOW_CONFIDENCE_HYPOTHESIS" : "ROOT_CAUSE_IDENTIFIED");
                     }
                     if (hypothesisOnly) {
-                        // 低置信度且没有组件级证据时，保留模型假设供人工复核，但不把它当作已定位根因。
+                        // 只有连通性探测失败证据时，不能据此断言进程停止或具体根因。
                         report.put("result", RunStatus.INSUFFICIENT_EVIDENCE.name());
-                        report.put("assessmentNote",
-                                "置信度为 LOW 且未获得组件级证据，该内容仅为可验证假设，未定位根因");
+                        report.put("assessmentNote", connectivityEvidenceOnly
+                                ? "只有连通性探测失败证据，未获得组件级证据；"
+                                + "目标服务可能不可达，具体根因待核实"
+                                : "置信度为 LOW 且未获得组件级证据，该内容仅为可验证假设，未定位根因");
                     } else {
                         report.put("result", RunStatus.ROOT_CAUSE_IDENTIFIED.name());
                     }
@@ -281,6 +286,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                             "FINAL_REPORT_ACCEPTED", latencyMs, userPrompt.length(),
                             response, modelName, null, finalReport.reason());
                     finalTrace.put("componentEvidenceAvailable", componentEvidenceAvailable);
+                    finalTrace.put("connectivityEvidenceOnly", connectivityEvidenceOnly);
                     finalTrace.put("assessment", report.get("assessment"));
                     trace.add(finalTrace);
                     if (hypothesisOnly) {
@@ -340,6 +346,24 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             }
         }
         return false;
+    }
+
+    /**
+     * 只有 connectivity: 证据意味着两次探测都没有建立连接。
+     * 该证据可以说明不可达，但不足以断言进程停止、崩溃或具体根因。
+     */
+    private boolean onlyConnectivityEvidence(List<Observation> observations) {
+        boolean sawConnectivity = false;
+        for (Observation observation : observations) {
+            for (String evidenceId : observation.evidenceIds()) {
+                if (evidenceId.startsWith("connectivity:")) {
+                    sawConnectivity = true;
+                } else {
+                    return false;
+                }
+            }
+        }
+        return sawConnectivity;
     }
 
     private boolean nonEmptyList(Object value) {

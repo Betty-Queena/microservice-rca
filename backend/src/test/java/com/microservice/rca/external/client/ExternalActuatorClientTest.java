@@ -297,6 +297,45 @@ class ExternalActuatorClientTest {
                 .containsExactly("COUNT");
     }
 
+    @Test
+    void healthMarksRealConnectionFailureAsUnreachable() {
+        when(httpClient.get(any(URI.class))).thenThrow(
+                new ExternalServiceException("连接被拒绝或服务未启动"));
+
+        ExternalActuatorClient.HealthSnapshot snapshot = client.health(service(
+                "http://localhost:8083", null));
+
+        assertThat(snapshot.available()).isFalse();
+        assertThat(snapshot.status()).isEqualTo("UNREACHABLE");
+        assertThat(snapshot.message()).contains("连接被拒绝");
+        assertThat(snapshot.components()).isEmpty();
+    }
+
+    @Test
+    void healthValidationFailureIsNotReportedAsConnectivity() {
+        ExternalActuatorClient.HealthSnapshot snapshot = client.health(service(
+                "ftp://localhost:8083", null));
+
+        assertThat(snapshot.available()).isFalse();
+        assertThat(snapshot.status()).isEqualTo("INVALID_CONFIG");
+        verifyNoInteractions(httpClient);
+    }
+
+    @Test
+    void metricsMarksRealConnectionFailureAsUnreachable() {
+        when(httpClient.get(any(URI.class))).thenThrow(
+                new ExternalServiceException("请求超时（5000 ms）"));
+        ExternalService service = service("http://localhost:8083", null);
+        service.setMetricsPath("/actuator/metrics");
+
+        ExternalActuatorClient.MetricsSnapshot snapshot = client.metrics(service);
+
+        assertThat(snapshot.available()).isFalse();
+        assertThat(snapshot.connectivityFailure()).isTrue();
+        assertThat(snapshot.message()).contains("请求超时");
+        assertThat(snapshot.metrics()).isEmpty();
+    }
+
     private ExternalActuatorClient.HealthComponent component(
             ExternalActuatorClient.HealthSnapshot snapshot, String path) {
         return snapshot.components().stream()

@@ -118,6 +118,8 @@ public class AgentPromptBuilder {
                 - affectedServices 只能填写 "%s"；不得填写未注册的服务。
                 - confidenceLevel 只能是 HIGH、MEDIUM、LOW，不输出精确概率。
                 - 如果只有整体 UP/DOWN 或通用 JVM/HTTP 指标，没有组件级证据，不得声称已经定位到具体根因；应输出 INSUFFICIENT_EVIDENCE。
+                - query_health/query_metrics 返回 connectivity: 开头的证据时，只能说明本次探测未建立连接；可以得出“目标服务不可达”，但不得据此断言进程已停止、服务崩溃或网络配置错误，具体根因需人工核实。
+                - 如果只有 connectivity 证据，没有组件级证据或其他成功证据，必须选择 INSUFFICIENT_EVIDENCE，并在 reason 中说明目标服务不可达、具体根因待核实。
                 - 工具失败或证据不足时，必须选择 INSUFFICIENT_EVIDENCE，不能编造根因。
                 - 不要重复提交完全相同的工具调用；请使用已有观察结果继续分析或结束调查。
                 """.formatted(finalActionNo, serviceName, serviceName,
