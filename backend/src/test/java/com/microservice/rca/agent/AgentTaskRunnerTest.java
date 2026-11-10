@@ -122,6 +122,30 @@ class AgentTaskRunnerTest {
     }
 
     @Test
+    void persistsBudgetFallbackAsInconclusiveWithoutWritingRootCause() {
+        when(orchestrator.diagnose(any())).thenReturn(AgentOrchestrator.AgentRunResult
+                .insufficientEvidence(
+                        Map.of(
+                                "reason", "模型调用次数达到上限（6），最后一轮未形成最终报告",
+                                "fallback", true,
+                                "observedEvidenceIds", List.of("log:order-service:log-1")),
+                        List.of(Map.of("type", "AGENT_FALLBACK")),
+                        "deepseek-flash"));
+
+        runner.run(task.getId());
+
+        DiagnosisTask saved = lastSaved();
+        assertThat(saved.getStatus()).isEqualTo(DiagnosisStatus.SUCCEEDED);
+        assertThat(saved.getResultStatus()).isEqualTo(DiagnosisResultStatus.INSUFFICIENT_EVIDENCE);
+        assertThat(saved.getRootCause()).isNull();
+        assertThat(saved.getConfidenceLevel()).isNull();
+        assertThat(saved.getConclusion()).startsWith("未形成结论")
+                .doesNotStartWith("证据不足");
+        assertThat(saved.getReport()).contains("\"fallback\":true");
+        assertThat(saved.getFailureReason()).isNull();
+    }
+
+    @Test
     void persistsLowConfidenceHypothesisWithoutWritingRootCause() {
         when(orchestrator.diagnose(any())).thenReturn(
                 AgentOrchestrator.AgentRunResult.lowConfidenceHypothesis(

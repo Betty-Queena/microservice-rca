@@ -98,6 +98,34 @@ final class AgentTestSupport {
                                               int maxModelCalls,
                                               int maxToolCalls,
                                               java.time.Duration overallTimeout) {
+        return input(registry, "DOWNSTREAM_TIMEOUT", "ERROR", "订单结算调用库存服务超时",
+                Map.of(
+                        "outcome", "DOWNSTREAM_TIMEOUT",
+                        "httpStatus", 502,
+                        "durationMs", 5410,
+                        "downstreamErrorType", "TIMEOUT"),
+                maxModelCalls, maxToolCalls, overallTimeout);
+    }
+
+    static AgentOrchestrator.AgentInput input(DiagnosticToolRegistry registry,
+                                              String eventType,
+                                              String severity,
+                                              String summary,
+                                              Map<String, Object> observedResult,
+                                              int maxModelCalls,
+                                              int maxToolCalls) {
+        return input(registry, eventType, severity, summary, observedResult,
+                maxModelCalls, maxToolCalls, java.time.Duration.ofSeconds(60));
+    }
+
+    static AgentOrchestrator.AgentInput input(DiagnosticToolRegistry registry,
+                                              String eventType,
+                                              String severity,
+                                              String summary,
+                                              Map<String, Object> observedResult,
+                                              int maxModelCalls,
+                                              int maxToolCalls,
+                                              java.time.Duration overallTimeout) {
         Instant end = Instant.parse("2026-10-21T02:00:00Z");
         return new AgentOrchestrator.AgentInput(
                 UUID.randomUUID(),
@@ -105,14 +133,10 @@ final class AgentTestSupport {
                 "inventory-service",
                 "BUILT_IN",
                 List.of("all", "order-service", "inventory-service"),
-                "DOWNSTREAM_TIMEOUT",
-                "ERROR",
-                "订单结算调用库存服务超时",
-                Map.of(
-                        "outcome", "DOWNSTREAM_TIMEOUT",
-                        "httpStatus", 502,
-                        "durationMs", 5410,
-                        "downstreamErrorType", "TIMEOUT"),
+                eventType,
+                severity,
+                summary,
+                observedResult,
                 "exp-abc123",
                 end.minusSeconds(900),
                 end,

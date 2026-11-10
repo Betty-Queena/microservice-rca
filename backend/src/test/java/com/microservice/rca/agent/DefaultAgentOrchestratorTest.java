@@ -174,6 +174,31 @@ class DefaultAgentOrchestratorTest {
     }
 
     @Test
+    void normalRequestWithoutEvidenceDoesNotFabricateRootCause() {
+        DiagnosticToolRegistry registry = AgentTestSupport.registry(
+                tool("query_logs", ToolResult.success(Map.of(
+                        "tool", "query_logs",
+                        "dataSources", List.of("order-service:/api/observability/logs"),
+                        "evidenceIds", List.of(),
+                        "items", List.of(),
+                        "warnings", List.of()))));
+        AgentTestSupport.ScriptedModelClient model = new AgentTestSupport.ScriptedModelClient(
+                true,
+                callTool("query_logs", Map.of("service", "all", "limit", 20)),
+                insufficientEvidence());
+
+        AgentRunResult result = orchestrator(model, registry, AgentTestSupport.invocationRepository(), 3, 2)
+                .diagnose(input(registry, "SUCCESS", "INFO", "请求正常完成，未观察到异常",
+                        Map.of("outcome", "SUCCESS", "httpStatus", 200, "durationMs", 120),
+                        3, 2));
+
+        assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.INSUFFICIENT_EVIDENCE);
+        assertThat(result.report()).doesNotContainKey("rootCause");
+        assertThat(result.confidenceLevel()).isNull();
+        assertThat(model.requests()).hasSize(2);
+    }
+
+    @Test
     void recordsConfigurationFailureWhenKeyIsMissing() {
         DiagnosticToolRegistry registry = AgentTestSupport.registry(
                 tool("query_logs", ToolResult.success(logsOutput())));
@@ -372,7 +397,7 @@ class DefaultAgentOrchestratorTest {
     }
 
     @Test
-    void stopsWhenModelCallLimitIsReached() {
+    void fallsBackToInsufficientEvidenceWhenModelCallLimitIsReached() {
         DiagnosticToolRegistry registry = AgentTestSupport.registry(
                 tool("query_logs", ToolResult.success(logsOutput())));
         AgentTestSupport.ScriptedModelClient model = new AgentTestSupport.ScriptedModelClient(
@@ -383,9 +408,73 @@ class DefaultAgentOrchestratorTest {
         AgentRunResult result = orchestrator(model, registry, AgentTestSupport.invocationRepository(), 1, 3)
                 .diagnose(input(registry, 1, 3));
 
-        assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.FAILED);
-        assertThat(result.failureReason()).contains("最大模型调用轮数");
+        assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.INSUFFICIENT_EVIDENCE);
+        assertThat(result.failureReason()).isNull();
+        assertThat(result.report()).containsEntry("fallback", true)
+                .containsEntry("fallbackReason", "MODEL_BUDGET_EXHAUSTED");
+        assertThat(result.report().get("observedEvidenceIds")).asList()
+                .contains("log:order-service:log-1");
+        assertThat(result.decisionTrace()).anySatisfy(entry ->
+                assertThat(entry.get("type")).isEqualTo("AGENT_FALLBACK"));
         assertThat(model.requests()).hasSize(1);
+    }
+
+    @Test
+    void staysFailedWhenBudgetExhaustsWithoutAnyToolObservation() {
+        DiagnosticToolRegistry registry = AgentTestSupport.registry(
+                tool("query_logs", ToolResult.success(logsOutput())));
+        AgentTestSupport.ScriptedModelClient model = new AgentTestSupport.ScriptedModelClient(
+                true,
+                callTool("query_health", Map.of("service", "all")));
+
+        AgentRunResult result = orchestrator(model, registry, AgentTestSupport.invocationRepository(), 1, 1)
+                .diagnose(input(registry, 1, 1));
+
+        assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.FAILED);
+        assertThat(result.failureReason()).contains("最大模型调用轮数")
+                .contains("TOOL_REJECTED");
+        assertThat(result.report()).isNull();
+        assertThat(result.decisionTrace()).noneMatch(entry ->
+                "AGENT_FALLBACK".equals(entry.get("type")));
+    }
+
+    @Test
+    void finalRoundReportWithoutAnyEvidenceFailsWithAuditableReason() {
+        DiagnosticToolRegistry registry = AgentTestSupport.registry(
+                tool("query_logs", ToolResult.success(logsOutput())));
+        AgentTestSupport.ScriptedModelClient model = new AgentTestSupport.ScriptedModelClient(
+                true,
+                finalReport(List.of("log:order-service:log-1")));
+
+        AgentRunResult result = orchestrator(model, registry, AgentTestSupport.invocationRepository(), 1, 2)
+                .diagnose(input(registry, 1, 2));
+
+        assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.FAILED);
+        assertThat(result.failureReason()).contains("最大模型调用轮数")
+                .contains("尚无真实证据");
+        assertThat(result.report()).isNull();
+    }
+
+    @Test
+    void budgetFallbackDoesNotReportEarlierRejectionAsLastDecision() {
+        DiagnosticToolRegistry registry = AgentTestSupport.registry(
+                tool("query_logs", ToolResult.success(logsOutput())));
+        AgentTestSupport.ScriptedModelClient model = new AgentTestSupport.ScriptedModelClient(
+                true,
+                callTool("query_health", Map.of("service", "all")),
+                callTool("query_logs", Map.of("service", "all", "limit", 20)));
+
+        AgentRunResult result = orchestrator(model, registry, AgentTestSupport.invocationRepository(), 2, 3)
+                .diagnose(input(registry, 2, 3));
+
+        assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.INSUFFICIENT_EVIDENCE);
+        assertThat(result.report()).containsEntry("fallback", true);
+        // 第一轮工具被拒绝，但最后一轮成功取证；兜底不得把第一轮的拒绝写成最后决策。
+        assertThat(result.report().get("lastDecision")).isNull();
+        assertThat(String.valueOf(result.report().get("reason")))
+                .doesNotContain("TOOL_REJECTED");
+        assertThat(result.report().get("observedEvidenceIds")).asList()
+                .contains("log:order-service:log-1");
     }
 
     @Test
@@ -406,6 +495,148 @@ class DefaultAgentOrchestratorTest {
             assertThat(String.valueOf(entry.get("error"))).contains("重复");
         });
         assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.INSUFFICIENT_EVIDENCE);
+    }
+
+    @Test
+    void reportsSlowResponseWhenLatencyIsLocalized() {
+        DiagnosticToolRegistry registry = AgentTestSupport.registry(
+                tool("query_logs", ToolResult.success(logsOutput())),
+                tool("query_metrics", ToolResult.success(metricsOutput())));
+        AgentTestSupport.ScriptedModelClient model = new AgentTestSupport.ScriptedModelClient(
+                true,
+                callTool("query_logs", Map.of("service", "all", "limit", 20)),
+                finalReport(List.of("log:inventory-service:log-2"), "MEDIUM"));
+
+        AgentRunResult result = orchestrator(model, registry, AgentTestSupport.invocationRepository(), 4, 3)
+                .diagnose(input(registry, "SLOW_RESPONSE", "WARNING",
+                        "订单结算请求成功，但耗时 3529 ms，超过慢响应阈值 3000 ms",
+                        Map.of("outcome", "SLOW_RESPONSE", "httpStatus", 200,
+                                "durationMs", 3529, "orderStatus", "CONFIRMED"),
+                        4, 3));
+
+        assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.ROOT_CAUSE_IDENTIFIED);
+        assertThat(result.confidenceLevel()).isEqualTo("MEDIUM");
+        assertThat(result.report().get("supportingEvidenceIds")).asList()
+                .containsExactly("log:inventory-service:log-2");
+        assertThat(result.report().get("limitations")).asList().isNotEmpty();
+        assertThat(result.decisionTrace()).noneMatch(entry ->
+                "AGENT_FALLBACK".equals(entry.get("type")));
+        assertThat(model.requests()).hasSize(2);
+        assertThat(model.requests().get(0).systemPrompt())
+                .contains("调用环节")
+                .contains("内部原因")
+                .doesNotContain("experimentFaultType");
+    }
+
+    @Test
+    void reportsHttp500WithDownstreamEvidence() {
+        DiagnosticToolRegistry registry = AgentTestSupport.registry(
+                tool("query_logs", ToolResult.success(logsOutput())));
+        AgentTestSupport.ScriptedModelClient model = new AgentTestSupport.ScriptedModelClient(
+                true,
+                callTool("query_logs", Map.of("service", "all", "limit", 20)),
+                finalReport(List.of("log:order-service:log-1"), "MEDIUM"));
+
+        AgentRunResult result = orchestrator(model, registry, AgentTestSupport.invocationRepository(), 4, 3)
+                .diagnose(input(registry, "DOWNSTREAM_HTTP_5XX", "ERROR",
+                        "订单结算失败，下游库存服务返回 5xx",
+                        Map.of("outcome", "DOWNSTREAM_HTTP_5XX", "httpStatus", 502,
+                                "durationMs", 122, "downstreamErrorType", "HTTP_5XX"),
+                        4, 3));
+
+        assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.ROOT_CAUSE_IDENTIFIED);
+        assertThat(result.confidenceLevel()).isEqualTo("MEDIUM");
+        assertThat(result.report().get("supportingEvidenceIds")).asList()
+                .containsExactly("log:order-service:log-1");
+    }
+
+    @Test
+    void promptsForTerminalActionOnFinalRound() {
+        DiagnosticToolRegistry registry = AgentTestSupport.registry(
+                tool("query_logs", ToolResult.success(logsOutput())));
+        AgentTestSupport.ScriptedModelClient model = new AgentTestSupport.ScriptedModelClient(
+                true,
+                callTool("query_logs", Map.of("service", "all", "limit", 20)),
+                insufficientEvidence());
+
+        orchestrator(model, registry, AgentTestSupport.invocationRepository(), 2, 3)
+                .diagnose(input(registry, 2, 3));
+
+        assertThat(model.requests()).hasSize(2);
+        String finalPrompt = model.requests().get(1).userPrompt();
+        assertThat(finalPrompt).contains("\"finalRound\":true")
+                .contains("\"remainingModelCalls\":0")
+                .contains("FINAL_REPORT_OR_INSUFFICIENT_EVIDENCE");
+    }
+
+    @Test
+    void lastRoundDuplicateFallsBackToInsufficientEvidence() {
+        DiagnosticToolRegistry registry = AgentTestSupport.registry(
+                tool("query_logs", ToolResult.success(logsOutput())));
+        AgentTestSupport.ScriptedModelClient model = new AgentTestSupport.ScriptedModelClient(
+                true,
+                callTool("query_logs", Map.of("service", "all", "limit", 20)),
+                callTool("query_logs", Map.of("service", "all", "limit", 20)));
+
+        AgentRunResult result = orchestrator(model, registry, AgentTestSupport.invocationRepository(), 2, 4)
+                .diagnose(input(registry, 2, 4));
+
+        assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.INSUFFICIENT_EVIDENCE);
+        assertThat(result.report()).containsEntry("fallback", true)
+                .containsEntry("fallbackReason", "MODEL_BUDGET_EXHAUSTED");
+        assertThat(String.valueOf(result.report().get("lastDecision")))
+                .contains("DUPLICATE_TOOL_CALL")
+                .contains("query_logs|all|30|20|");
+        assertThat(result.report().get("observedEvidenceIds")).asList()
+                .contains("log:order-service:log-1");
+        assertThat(result.decisionTrace()).anySatisfy(entry -> {
+            assertThat(entry.get("type")).isEqualTo("TOOL_REJECTED");
+            assertThat(String.valueOf(entry.get("error"))).contains("重复");
+        });
+        assertThat(result.decisionTrace()).anySatisfy(entry ->
+                assertThat(entry.get("type")).isEqualTo("AGENT_FALLBACK"));
+        assertThat(model.requests()).hasSize(2);
+    }
+
+    @Test
+    void lastRoundRejectedReportFallsBackToInsufficientEvidence() {
+        DiagnosticToolRegistry registry = AgentTestSupport.registry(
+                tool("query_logs", ToolResult.success(logsOutput())));
+        AgentTestSupport.ScriptedModelClient model = new AgentTestSupport.ScriptedModelClient(
+                true,
+                callTool("query_logs", Map.of("service", "all", "limit", 20)),
+                finalReport(List.of("log:order-service:not-exist")));
+
+        AgentRunResult result = orchestrator(model, registry, AgentTestSupport.invocationRepository(), 2, 3)
+                .diagnose(input(registry, 2, 3));
+
+        assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.INSUFFICIENT_EVIDENCE);
+        assertThat(result.report()).containsEntry("fallback", true);
+        assertThat(String.valueOf(result.report().get("lastDecision")))
+                .contains("FINAL_REPORT_REJECTED");
+        assertThat(result.decisionTrace()).anySatisfy(entry ->
+                assertThat(entry.get("type")).isEqualTo("AGENT_FALLBACK"));
+    }
+
+    @Test
+    void warnsWhenToolReturnsNoNewEvidence() {
+        DiagnosticToolRegistry registry = AgentTestSupport.registry(
+                tool("query_logs", ToolResult.success(logsOutput())),
+                tool("query_metrics", ToolResult.success(metricsOutput())));
+        AgentTestSupport.ScriptedModelClient model = new AgentTestSupport.ScriptedModelClient(
+                true,
+                callTool("query_logs", Map.of("service", "all", "limit", 20)),
+                callTool("query_metrics", Map.of("service", "all", "lookbackMinutes", 10)),
+                callTool("query_logs", Map.of("service", "all", "limit", 30)),
+                insufficientEvidence());
+
+        AgentRunResult result = orchestrator(model, registry, AgentTestSupport.invocationRepository(), 4, 3)
+                .diagnose(input(registry, 4, 3));
+
+        assertThat(result.status()).isEqualTo(AgentOrchestrator.RunStatus.INSUFFICIENT_EVIDENCE);
+        assertThat(model.requests()).hasSize(4);
+        assertThat(model.requests().get(3).userPrompt())
+                .contains("没有产生新的 evidenceId");
     }
 
     @Test

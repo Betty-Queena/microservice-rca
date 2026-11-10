@@ -55,13 +55,23 @@ public class AgentPromptBuilder {
                 4. 证据不足：
                    {"action":"INSUFFICIENT_EVIDENCE","reason":"现有证据不足的具体原因","limitations":["缺少哪些证据"]}
 
+                决策收敛与结论粒度：
+                - 先定位“慢响应或错误发生在哪个服务、哪个调用环节”，再讨论“该服务内部的具体原因”。二者不是同一层次的结论。
+                - 只要真实工具证据能把请求总耗时主要归因到某个下游服务或调用环节，就可以输出 FINAL_REPORT；不要求证明该现象持续多个时间桶、存在基线对比，也不要求已经找到内部代码原因。
+                - rootCause 写“已由证据定位的服务或调用环节”；hypothesis 写“尚未验证的内部原因”。如果无法提出可检验的内部原因，hypothesis 必须明确写“内部原因尚未确认”，不得猜测具体代码缺陷；同时把“未定位到服务内部根因”写入 limitations。
+                - 如果结论只定位到服务或调用环节、内部原因尚未确认：confidenceLevel 使用 MEDIUM（请求级证据充分）或 LOW（只有聚合指标）；不要仅为了把 MEDIUM 提升到 HIGH 而继续取证。
+                - 如果能直接观察到明确的服务端错误证据（如错误日志、5xx 响应），仍可按证据强度使用 HIGH，不需要为了统一置信度而继续查询。
+                - “内部原因未知”不等于“证据不足”。只有连“慢在哪个服务/环节”都无法定位，或工具失败导致没有可用证据时，才输出 INSUFFICIENT_EVIDENCE。
+                - 输出报告前先自检：现有证据是否已经能回答“慢在哪里/错在哪里”？若能，立即输出 FINAL_REPORT；若下一次查询与已有查询实质重复或不可能改变结论，不得继续调用工具。
+                - 当 investigationState.finalRound=true 时，本轮不得调用工具，必须输出 FINAL_REPORT 或 INSUFFICIENT_EVIDENCE。
+
                 强制规则：
                 - supportingEvidenceIds 中的每个 ID 必须原样出现在真实工具结果的 evidenceIds 中，禁止编造。
                 - 不得假设未观察到的事实；不得把实验预设当作已知答案。
                 - confidenceLevel 只能是 HIGH、MEDIUM、LOW，不输出精确概率。
                 - 工具失败或证据不足时，必须选择 INSUFFICIENT_EVIDENCE，不能编造根因。
                 - 不要请求执行命令、SQL 或任意 HTTP 请求；只能使用给定工具。
-                - 不要重复提交完全相同的工具调用；请使用已有观察结果继续分析或结束调查。
+                - 不要重复提交完全相同的工具调用，也不要仅调整 limit/lookback 等参数重复查询相同范围；请使用已有观察结果继续分析或结束调查。
                 """;
     }
 
@@ -122,6 +132,7 @@ public class AgentPromptBuilder {
                 - 如果只有 connectivity 证据，没有组件级证据或其他成功证据，必须选择 INSUFFICIENT_EVIDENCE，并在 reason 中说明目标服务不可达、具体根因待核实。
                 - 工具失败或证据不足时，必须选择 INSUFFICIENT_EVIDENCE，不能编造根因。
                 - 不要重复提交完全相同的工具调用；请使用已有观察结果继续分析或结束调查。
+                - 当 investigationState.finalRound=true 或 toolCallCount 达到上限时，本轮不得再调用工具，必须输出 FINAL_REPORT 或 INSUFFICIENT_EVIDENCE。
                 """.formatted(finalActionNo, serviceName, serviceName,
                 insufficientActionNo, availableToolText, serviceName));
         String unavailableReason = input.unavailableTools().get("query_logs");
@@ -149,11 +160,19 @@ public class AgentPromptBuilder {
         event.put("windowStart", input.windowStart().toString());
         event.put("windowEnd", input.windowEnd().toString());
 
+        boolean finalRound = modelCallNo >= input.limits().maxModelCalls();
+        boolean toolBudgetExhausted = toolCallCount >= input.limits().maxToolCalls();
         Map<String, Object> state = new LinkedHashMap<>();
         state.put("modelCallNo", modelCallNo);
         state.put("maxModelCalls", input.limits().maxModelCalls());
+        state.put("remainingModelCalls", Math.max(0, input.limits().maxModelCalls() - modelCallNo));
+        state.put("finalRound", finalRound);
         state.put("toolCallCount", toolCallCount);
         state.put("maxToolCalls", input.limits().maxToolCalls());
+        state.put("toolBudgetExhausted", toolBudgetExhausted);
+        if (finalRound || toolBudgetExhausted) {
+            state.put("requiredAction", "FINAL_REPORT_OR_INSUFFICIENT_EVIDENCE");
+        }
 
         List<Map<String, Object>> toolDefinitions = new ArrayList<>();
         for (DiagnosticToolRegistry.ToolDefinition tool : input.availableTools()) {

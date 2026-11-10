@@ -143,7 +143,8 @@ public class AgentTaskRunner {
                 } else {
                     task.setConfidenceLevel(null);
                     task.setRootCause(null);
-                    task.setConclusion(truncate("证据不足："
+                    boolean fallback = Boolean.TRUE.equals(result.report().get("fallback"));
+                    task.setConclusion(truncate((fallback ? "未形成结论：" : "证据不足：")
                             + result.report().getOrDefault("reason", "未形成可验证根因"), 2048));
                 }
                 task.setReport(jsonSupport.write(withRunStats(result.report(), stats)));

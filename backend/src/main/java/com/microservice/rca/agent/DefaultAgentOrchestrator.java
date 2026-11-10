@@ -62,6 +62,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         Set<String> knownEvidenceIds = new LinkedHashSet<>();
         Set<String> executedSignatures = new LinkedHashSet<>();
         String feedback = null;
+        String lastTerminalReason = null;
         boolean lengthTruncationRetried = false;
         int modelCalls = 0;
         int toolCalls = 0;
@@ -84,6 +85,8 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             }
 
             modelCalls++;
+            // 兜底原因只反映“最后一轮”发生了什么，避免把更早轮次的拒绝误报为最后决策。
+            lastTerminalReason = null;
             String userPrompt = promptBuilder.userPrompt(
                     input, observations, feedback, modelCalls, toolCalls);
             if (userPrompt.length() > input.limits().maxPromptChars()) {
@@ -137,6 +140,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             } catch (AgentValidationException ex) {
                 trace.add(modelDecisionTrace(modelCalls, "INVALID_OUTPUT", latencyMs,
                         userPrompt.length(), response, modelName, ex.getMessage(), null));
+                lastTerminalReason = "INVALID_OUTPUT: " + truncate(ex.getMessage(), MAX_ERROR_LENGTH);
                 if (response.lengthTruncated()) {
                     // finish_reason=length 说明输出被 max_tokens 截断，盲目原样重试只会重复消耗 Token。
                     // 只允许一次带明确指令的重试；仍截断或已无剩余轮数时终止并留下可审计原因。
@@ -163,6 +167,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                     trace.add(modelDecisionTrace(modelCalls, "CALL_TOOL_REJECTED", latencyMs,
                             userPrompt.length(), response, modelName,
                             "工具调用次数已达上限", callTool.reason()));
+                    lastTerminalReason = "TOOL_LIMIT_REACHED";
                     feedback = "工具调用次数已达上限 " + input.limits().maxToolCalls()
                             + "，不得再调用工具，请输出 FINAL_REPORT 或 INSUFFICIENT_EVIDENCE。";
                     continue;
@@ -174,6 +179,8 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 } catch (AgentValidationException ex) {
                     trace.add(toolRejectedTrace(modelCalls, callTool, latencyMs,
                             userPrompt.length(), response, modelName, ex.getMessage()));
+                    lastTerminalReason = "TOOL_REJECTED: "
+                            + truncate(ex.getMessage(), MAX_ERROR_LENGTH);
                     feedback = "工具调用被拒绝: " + ex.getMessage() + "。请修正参数或改用已注册工具。";
                     continue;
                 }
@@ -182,6 +189,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                     trace.add(toolRejectedTrace(modelCalls, callTool, latencyMs,
                             userPrompt.length(), response, modelName,
                             "重复的工具调用已被跳过: " + call.signature()));
+                    lastTerminalReason = "DUPLICATE_TOOL_CALL: " + call.signature();
                     feedback = "检测到完全相同的重复工具调用，已跳过执行。请使用已有观察结果继续分析，"
                             + "或调整查询范围，或结束调查。";
                     continue;
@@ -218,6 +226,8 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                         toolCalls);
 
                 List<String> evidenceIds = extractEvidenceIds(outcome.result().output());
+                boolean hasNewEvidence = evidenceIds.stream()
+                        .anyMatch(evidenceId -> !knownEvidenceIds.contains(evidenceId));
                 // 失败的工具结果也可能携带真实探测证据（如 connectivity:），
                 // 必须保留下来供模型、最终报告和审计引用；成功状态仍按工具结果单独判断。
                 knownEvidenceIds.addAll(evidenceIds);
@@ -232,7 +242,12 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                         outcome.result().output());
                 observations.add(observation);
                 trace.add(toolExecutionTrace(modelCalls, call, outcome, evidenceIds));
-                feedback = null;
+                // 仅对成功但未产生新 evidenceId 的查询给出软反馈：不阻断执行，
+                // 但提示模型不要用相同或实质相同的范围反复取证。
+                feedback = outcome.result().success() && !hasNewEvidence
+                        ? "本次查询没有产生新的 evidenceId。请不要再用相同或实质相同的范围查询；"
+                        + "请基于已有观察输出 FINAL_REPORT，或输出 INSUFFICIENT_EVIDENCE。"
+                        : null;
                 continue;
             }
 
@@ -241,6 +256,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                     trace.add(modelDecisionTrace(modelCalls, "FINAL_REPORT_REJECTED", latencyMs,
                             userPrompt.length(), response, modelName,
                             "尚无真实证据，拒绝根因报告", finalReport.reason()));
+                    lastTerminalReason = "FINAL_REPORT_REJECTED: 尚无真实证据";
                     feedback = "当前没有任何成功的工具证据，不能输出根因报告。"
                             + "请先调用已注册的只读工具（"
                             + input.availableTools().stream()
@@ -296,6 +312,8 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 } catch (AgentValidationException ex) {
                     trace.add(modelDecisionTrace(modelCalls, "FINAL_REPORT_REJECTED", latencyMs,
                             userPrompt.length(), response, modelName, ex.getMessage(), finalReport.reason()));
+                    lastTerminalReason = "FINAL_REPORT_REJECTED: "
+                            + truncate(ex.getMessage(), MAX_ERROR_LENGTH);
                     feedback = "最终报告校验失败: " + ex.getMessage()
                             + "。只能引用工具结果中真实存在的 evidenceIds。";
                     continue;
@@ -319,8 +337,66 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             }
         }
 
-        return AgentRunResult.failed("达到最大模型调用轮数（"
-                + input.limits().maxModelCalls() + "）仍未形成可验证结论", trace, modelName);
+        return budgetExhaustedFallback(input, observations, knownEvidenceIds, trace,
+                modelName, modelCalls, toolCalls, lastTerminalReason);
+    }
+
+    /**
+     * 模型轮次耗尽时的确定性兜底。
+     *
+     * <p>如果已经执行过工具，说明系统获得过真实观察，不能把整个任务判为执行失败：
+     * 保留已有 evidenceId，返回 INSUFFICIENT_EVIDENCE，并明确“模型未形成结论”。
+     * 如果从未获得任何工具结果，仍按 FAILED 处理，避免把配置/模型故障伪装成证据不足。</p>
+     */
+    private AgentRunResult budgetExhaustedFallback(AgentInput input,
+                                                   List<Observation> observations,
+                                                   Set<String> knownEvidenceIds,
+                                                   List<Map<String, Object>> trace,
+                                                   String modelName,
+                                                   int modelCalls,
+                                                   int toolCalls,
+                                                   String lastTerminalReason) {
+        String budgetReason = "达到最大模型调用轮数（"
+                + input.limits().maxModelCalls() + "）仍未形成可验证结论";
+        if (observations.isEmpty()) {
+            return AgentRunResult.failed(lastTerminalReason == null
+                    ? budgetReason
+                    : budgetReason + "；最后决策：" + lastTerminalReason, trace, modelName);
+        }
+
+        String evidenceNote = knownEvidenceIds.isEmpty()
+                ? "已有工具调用但未获得可引用的 evidenceId"
+                : "系统保留已有真实工具证据，但未自动推断根因";
+        Map<String, Object> report = new LinkedHashMap<>();
+        report.put("result", RunStatus.INSUFFICIENT_EVIDENCE.name());
+        report.put("reason", "模型调用次数达到上限（" + input.limits().maxModelCalls()
+                + "），最后一轮未形成最终报告；" + evidenceNote
+                + (lastTerminalReason == null ? "" : "。最后决策：" + lastTerminalReason));
+        report.put("limitations", List.of(
+                "未完成模型计划中的后续调查",
+                "系统未根据已有证据自动生成根因结论",
+                "如需结论请人工复核 observedEvidenceIds 或重新诊断"));
+        report.put("observedEvidenceIds", new ArrayList<>(knownEvidenceIds));
+        report.put("fallback", true);
+        report.put("fallbackReason", "MODEL_BUDGET_EXHAUSTED");
+        report.put("lastDecision", lastTerminalReason);
+        report.put("model", modelName);
+        report.put("modelCallCount", modelCalls);
+        report.put("toolCallCount", toolCalls);
+        report.put("generatedAt", Instant.now().toString());
+        report.put("disclaimer", "证据不足，未生成根因结论；处置建议未执行");
+
+        Map<String, Object> fallbackTrace = baseTrace("AGENT_FALLBACK", modelCalls);
+        fallbackTrace.put("status", RunStatus.INSUFFICIENT_EVIDENCE.name());
+        fallbackTrace.put("fallback", true);
+        fallbackTrace.put("fallbackReason", "MODEL_BUDGET_EXHAUSTED");
+        fallbackTrace.put("lastDecision", lastTerminalReason);
+        fallbackTrace.put("modelCallCount", modelCalls);
+        fallbackTrace.put("toolCallCount", toolCalls);
+        fallbackTrace.put("evidenceCount", knownEvidenceIds.size());
+        fallbackTrace.put("observedEvidenceIds", new ArrayList<>(knownEvidenceIds));
+        trace.add(fallbackTrace);
+        return AgentRunResult.insufficientEvidence(report, trace, modelName);
     }
 
     /**
